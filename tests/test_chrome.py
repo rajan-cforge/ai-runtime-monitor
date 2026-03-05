@@ -21,6 +21,7 @@ def _make_watcher():
         def _extract_conversation_id(self, url, service):
             try:
                 from urllib.parse import urlparse
+
                 parsed = urlparse(url)
                 path = parsed.path
                 if service == "ChatGPT" and "/c/" in path:

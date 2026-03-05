@@ -15,30 +15,37 @@ def _setup_test_db(tmp_path):
     output_dir = tmp_path / "output"
     output_dir.mkdir(exist_ok=True)
 
-    with patch("claude_monitoring.monitor.DB_PATH", db_path), \
-         patch("claude_monitoring.monitor.OUTPUT_DIR", output_dir):
+    with patch("claude_monitoring.monitor.DB_PATH", db_path), patch("claude_monitoring.monitor.OUTPUT_DIR", output_dir):
         from claude_monitoring.monitor import init_db
+
         conn = init_db()
 
     # Insert sample data
     conn.execute(
         "INSERT INTO sessions (session_id, start_time, model, total_turns, total_input_tokens, total_output_tokens, total_cost, last_activity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ("test-sess-1", "2026-01-01T00:00:00Z", "claude-sonnet-4", 5, 1000, 500, 0.054, "2026-01-01T00:10:00Z")
+        ("test-sess-1", "2026-01-01T00:00:00Z", "claude-sonnet-4", 5, 1000, 500, 0.054, "2026-01-01T00:10:00Z"),
     )
     conn.execute(
         "INSERT INTO events (timestamp, session_id, event_type, source_layer, data_json) VALUES (?, ?, ?, ?, ?)",
-        ("2026-01-01T00:00:00Z", "test-sess-1", "user_prompt", "network", '{"text":"hello"}')
+        ("2026-01-01T00:00:00Z", "test-sess-1", "user_prompt", "network", '{"text":"hello"}'),
     )
     # Insert sample browser session data
     conn.execute(
         """INSERT INTO browser_sessions (service, url, title, conversation_id, visit_time, duration_seconds)
            VALUES (?, ?, ?, ?, ?, ?)""",
-        ("ChatGPT", "https://chatgpt.com/c/test-conv-1", "Test Chat", "test-conv-1", "2026-01-01T00:05:00Z", 120.0)
+        ("ChatGPT", "https://chatgpt.com/c/test-conv-1", "Test Chat", "test-conv-1", "2026-01-01T00:05:00Z", 120.0),
     )
     conn.execute(
         """INSERT INTO browser_sessions (service, url, title, conversation_id, visit_time, duration_seconds)
            VALUES (?, ?, ?, ?, ?, ?)""",
-        ("ChatGPT", "https://chatgpt.com/c/test-conv-1", "Test Chat Continued", "test-conv-1", "2026-01-01T00:08:00Z", 60.0)
+        (
+            "ChatGPT",
+            "https://chatgpt.com/c/test-conv-1",
+            "Test Chat Continued",
+            "test-conv-1",
+            "2026-01-01T00:08:00Z",
+            60.0,
+        ),
     )
     conn.commit()
     conn.close()
@@ -50,8 +57,7 @@ def api_server(tmp_path):
     """Start a real HTTP server on a random port for testing."""
     db_path, output_dir = _setup_test_db(tmp_path)
 
-    with patch("claude_monitoring.monitor.DB_PATH", db_path), \
-         patch("claude_monitoring.monitor.OUTPUT_DIR", output_dir):
+    with patch("claude_monitoring.monitor.DB_PATH", db_path), patch("claude_monitoring.monitor.OUTPUT_DIR", output_dir):
         from claude_monitoring.monitor import DashboardHandler
 
         server = HTTPServer(("127.0.0.1", 0), DashboardHandler)
@@ -103,6 +109,7 @@ class TestDashboardAPI:
 
     def test_unknown_path_404(self, api_server):
         from urllib.error import HTTPError
+
         with pytest.raises(HTTPError) as exc_info:
             urlopen(f"{api_server}/unknown/path")
         assert exc_info.value.code == 404
