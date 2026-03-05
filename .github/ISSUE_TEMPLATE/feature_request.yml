@@ -1,0 +1,43 @@
+name: Feature Request
+description: Suggest a new feature or enhancement
+labels: ["enhancement"]
+title: "[Feature]: "
+
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem does this solve?
+      placeholder: I'm always frustrated when...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      placeholder: Describe what you'd like to happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      placeholder: Other approaches you've thought about
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Dashboard UI
+        - Monitoring engine
+        - Alerts / DLP
+        - Network interception (claude-watch)
+        - API / Export
+        - Documentation
+        - Other
+    validations:
+      required: true

@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Watch Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+         background: #0d1117; color: #c9d1d9; }
+  .header { background: linear-gradient(135deg, #161b22, #1a1e2e);
+            padding: 20px 30px; border-bottom: 1px solid #30363d; }
+  .header h1 { font-size: 1.5em; color: #58a6ff; }
+  .header .subtitle { color: #8b949e; font-size: 0.85em; margin-top: 4px; }
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                gap: 12px; padding: 20px 30px; }
+  .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+               padding: 16px; text-align: center; }
+  .stat-card .value { font-size: 1.8em; font-weight: bold; color: #58a6ff; }
+  .stat-card .label { font-size: 0.75em; color: #8b949e; margin-top: 4px; text-transform: uppercase; }
+  .stat-card.alert .value { color: #f85149; }
+  .stat-card.cost .value { color: #3fb950; }
+  .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+                 padding: 0 30px 20px; }
+  .chart-box { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+               padding: 16px; }
+  .chart-box h3 { font-size: 0.9em; color: #8b949e; margin-bottom: 10px; }
+  .chart-box canvas { width: 100% !important; }
+  .table-section { padding: 0 30px 30px; }
+  .table-section h3 { color: #8b949e; margin-bottom: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.78em; }
+  th { background: #161b22; color: #58a6ff; padding: 8px; text-align: left;
+       border-bottom: 2px solid #30363d; position: sticky; top: 0; cursor: pointer; }
+  th:hover { background: #1c2333; }
+  td { padding: 6px 8px; border-bottom: 1px solid #21262d; max-width: 250px;
+       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  tr:hover td { background: #161b22; }
+  .sensitive { color: #f85149; font-weight: bold; }
+  .tool-tag { background: #1f3a5f; color: #58a6ff; padding: 2px 6px; border-radius: 3px;
+              font-size: 0.85em; margin-right: 3px; display: inline-block; }
+  .filter-bar { padding: 10px 30px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .filter-bar select, .filter-bar input { background: #161b22; color: #c9d1d9;
+    border: 1px solid #30363d; border-radius: 4px; padding: 6px 10px; font-size: 0.85em; }
+  .refresh-btn { background: #238636; color: white; border: none; border-radius: 4px;
+                 padding: 6px 16px; cursor: pointer; font-size: 0.85em; }
+  .refresh-btn:hover { background: #2ea043; }
+  @media (max-width: 900px) { .charts-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Claude Watch — AI Agent Observatory</h1>
+  <div class="subtitle">Real-time monitoring of all AI agent traffic on this machine</div>
+</div>
+<div class="stats-grid" id="stats"></div>
+<div class="filter-bar">
+  <select id="filterService"><option value="">All Services</option></select>
+  <select id="filterModel"><option value="">All Models</option></select>
+  <input type="text" id="filterSearch" placeholder="Search prompts, tools...">
+  <button class="refresh-btn" onclick="loadData()">Refresh</button>
+</div>
+<div class="charts-grid">
+  <div class="chart-box"><h3>Token Usage Over Time</h3><canvas id="chartTokens"></canvas></div>
+  <div class="chart-box"><h3>Cumulative Cost (USD)</h3><canvas id="chartCost"></canvas></div>
+  <div class="chart-box"><h3>Service Breakdown</h3><canvas id="chartServices"></canvas></div>
+  <div class="chart-box"><h3>Latency Distribution (ms)</h3><canvas id="chartLatency"></canvas></div>
+  <div class="chart-box"><h3>Tool Call Frequency</h3><canvas id="chartTools"></canvas></div>
+  <div class="chart-box"><h3>Data Volume (KB per turn)</h3><canvas id="chartVolume"></canvas></div>
+</div>
+<div class="table-section">
+  <h3>Request Log</h3>
+  <div style="max-height:500px; overflow-y:auto; border:1px solid #30363d; border-radius:8px;">
+    <table id="logTable">
+      <thead><tr>
+        <th onclick="sortTable(0)">#</th>
+        <th onclick="sortTable(1)">Time</th>
+        <th onclick="sortTable(2)">Service</th>
+        <th onclick="sortTable(3)">Model</th>
+        <th onclick="sortTable(4)">In Tok</th>
+        <th onclick="sortTable(5)">Out Tok</th>
+        <th onclick="sortTable(6)">Cost</th>
+        <th onclick="sortTable(7)">Latency</th>
+        <th onclick="sortTable(8)">Tools</th>
+        <th onclick="sortTable(9)">Prompt Preview</th>
+        <th onclick="sortTable(10)">Sensitive</th>
+      </tr></thead>
+      <tbody id="logBody"></tbody>
+    </table>
+  </div>
+</div>
+<script>
+let allData = [];
+let charts = {};
+let sortCol = -1, sortAsc = true;
+
+async function loadData() {
+  const res = await fetch("/api/data");
+  allData = await res.json();
+  renderAll();
+}
+
+function renderAll() {
+  const svcFilter = document.getElementById("filterService").value;
+  const modelFilter = document.getElementById("filterModel").value;
+  const searchFilter = document.getElementById("filterSearch").value.toLowerCase();
+  let data = allData;
+  if (svcFilter) data = data.filter(r => r.destination_service === svcFilter);
+  if (modelFilter) data = data.filter(r => r.model === modelFilter);
+  if (searchFilter) data = data.filter(r =>
+    JSON.stringify(r).toLowerCase().includes(searchFilter));
+
+  renderStats(data);
+  renderCharts(data);
+  renderTable(data);
+  populateFilters();
+}
+
+function populateFilters() {
+  const svcSelect = document.getElementById("filterService");
+  const modelSelect = document.getElementById("filterModel");
+  const svcs = [...new Set(allData.map(r => r.destination_service))].sort();
+  const models = [...new Set(allData.map(r => r.model).filter(Boolean))].sort();
+  const curSvc = svcSelect.value;
+  const curModel = modelSelect.value;
+  svcSelect.innerHTML = '<option value="">All Services</option>' +
+    svcs.map(s => `<option value="${s}" ${s===curSvc?'selected':''}>${s}</option>`).join('');
+  modelSelect.innerHTML = '<option value="">All Models</option>' +
+    models.map(m => `<option value="${m}" ${m===curModel?'selected':''}>${m}</option>`).join('');
+}
+
+function renderStats(data) {
+  const totalReqs = data.length;
+  const apiReqs = data.filter(r => r.destination_service?.includes('api')).length;
+  const inTok = data.reduce((s, r) => s + parseInt(r.input_tokens || 0), 0);
+  const outTok = data.reduce((s, r) => s + parseInt(r.output_tokens || 0), 0);
+  const cost = data.reduce((s, r) => s + parseFloat(r.estimated_cost_usd || 0), 0);
+  const sentKB = data.reduce((s, r) => s + parseInt(r.request_size_bytes || 0), 0) / 1024;
+  const recvKB = data.reduce((s, r) => s + parseInt(r.response_size_bytes || 0), 0) / 1024;
+  const sensitive = data.filter(r => r.sensitive_patterns).length;
+  const avgLat = data.length ? data.reduce((s, r) => s + parseInt(r.latency_ms || 0), 0) / data.length : 0;
+
+  document.getElementById("stats").innerHTML = `
+    <div class="stat-card"><div class="value">${totalReqs}</div><div class="label">Total Requests</div></div>
+    <div class="stat-card"><div class="value">${apiReqs}</div><div class="label">API Calls</div></div>
+    <div class="stat-card"><div class="value">${inTok.toLocaleString()}</div><div class="label">Input Tokens</div></div>
+    <div class="stat-card"><div class="value">${outTok.toLocaleString()}</div><div class="label">Output Tokens</div></div>
+    <div class="stat-card cost"><div class="value">$${cost.toFixed(4)}</div><div class="label">Total Cost</div></div>
+    <div class="stat-card"><div class="value">${(sentKB/1024).toFixed(2)} MB</div><div class="label">Data Sent</div></div>
+    <div class="stat-card"><div class="value">${(recvKB/1024).toFixed(2)} MB</div><div class="label">Data Received</div></div>
+    <div class="stat-card"><div class="value">${avgLat.toFixed(0)}ms</div><div class="label">Avg Latency</div></div>
+    <div class="stat-card ${sensitive?'alert':''}"><div class="value">${sensitive}</div><div class="label">Sensitive Alerts</div></div>
+  `;
+}
+
+function renderCharts(data) {
+  Object.values(charts).forEach(c => c.destroy());
+  charts = {};
+  const labels = data.map((_, i) => i + 1);
+
+  // Token usage
+  charts.tokens = new Chart(document.getElementById("chartTokens"), {
+    type: "line", data: { labels,
+      datasets: [
+        { label: "Input", data: data.map(r => parseInt(r.input_tokens||0)),
+          borderColor: "#4A90D9", backgroundColor: "rgba(74,144,217,0.1)", fill: true, pointRadius: 1 },
+        { label: "Output", data: data.map(r => parseInt(r.output_tokens||0)),
+          borderColor: "#E8744F", backgroundColor: "rgba(232,116,79,0.1)", fill: true, pointRadius: 1 }
+      ]},
+    options: { responsive: true, scales: { y: { beginAtZero: true } },
+               plugins: { legend: { labels: { color: "#c9d1d9" } } } }
+  });
+
+  // Cumulative cost
+  let cum = 0;
+  const cumCosts = data.map(r => { cum += parseFloat(r.estimated_cost_usd||0); return cum; });
+  charts.cost = new Chart(document.getElementById("chartCost"), {
+    type: "line", data: { labels,
+      datasets: [{ label: "Cumulative $", data: cumCosts,
+        borderColor: "#3fb950", backgroundColor: "rgba(63,185,80,0.1)", fill: true, pointRadius: 1 }]},
+    options: { responsive: true, scales: { y: { beginAtZero: true } },
+               plugins: { legend: { labels: { color: "#c9d1d9" } } } }
+  });
+
+  // Services pie
+  const svcCounts = {};
+  data.forEach(r => { svcCounts[r.destination_service||"unknown"] = (svcCounts[r.destination_service||"unknown"]||0)+1; });
+  charts.services = new Chart(document.getElementById("chartServices"), {
+    type: "doughnut", data: { labels: Object.keys(svcCounts), datasets: [{
+      data: Object.values(svcCounts),
+      backgroundColor: ["#4A90D9","#E8744F","#50C878","#9B59B6","#F39C12","#E74C3C","#1ABC9C","#8E44AD","#2ECC71","#E67E22"]
+    }]},
+    options: { responsive: true, plugins: { legend: { position: "right", labels: { color: "#c9d1d9", font: { size: 10 } } } } }
+  });
+
+  // Latency histogram (bucket into ranges)
+  const lats = data.map(r => parseInt(r.latency_ms||0)).filter(l => l > 0);
+  const maxLat = Math.max(...lats, 1);
+  const bucketSize = Math.max(Math.ceil(maxLat / 20), 100);
+  const buckets = {};
+  lats.forEach(l => { const b = Math.floor(l/bucketSize)*bucketSize; buckets[b] = (buckets[b]||0)+1; });
+  const sortedBuckets = Object.entries(buckets).sort((a,b) => parseInt(a[0])-parseInt(b[0]));
+  charts.latency = new Chart(document.getElementById("chartLatency"), {
+    type: "bar", data: { labels: sortedBuckets.map(b => b[0]+"ms"),
+      datasets: [{ label: "Count", data: sortedBuckets.map(b => b[1]),
+        backgroundColor: "rgba(155,89,182,0.7)", borderColor: "#9B59B6" }]},
+    options: { responsive: true, scales: { y: { beginAtZero: true } },
+               plugins: { legend: { labels: { color: "#c9d1d9" } } } }
+  });
+
+  // Tool frequency
+  const toolCounts = {};
+  data.forEach(r => { try { JSON.parse(r.tool_calls||"[]").forEach(t => { if(t) toolCounts[t]=(toolCounts[t]||0)+1; }); } catch(e){} });
+  const sortedTools = Object.entries(toolCounts).sort((a,b) => b[1]-a[1]).slice(0,12);
+  charts.tools = new Chart(document.getElementById("chartTools"), {
+    type: "bar", data: { labels: sortedTools.map(t => t[0]),
+      datasets: [{ label: "Uses", data: sortedTools.map(t => t[1]),
+        backgroundColor: "rgba(74,144,217,0.7)", borderColor: "#4A90D9" }]},
+    options: { responsive: true, indexAxis: "y", scales: { x: { beginAtZero: true } },
+               plugins: { legend: { labels: { color: "#c9d1d9" } } } }
+  });
+
+  // Data volume
+  charts.volume = new Chart(document.getElementById("chartVolume"), {
+    type: "line", data: { labels,
+      datasets: [
+        { label: "Request KB", data: data.map(r => (parseInt(r.request_size_bytes||0)/1024).toFixed(1)),
+          borderColor: "#E74C3C", backgroundColor: "rgba(231,76,60,0.1)", fill: true, pointRadius: 1 },
+        { label: "Response KB", data: data.map(r => (parseInt(r.response_size_bytes||0)/1024).toFixed(1)),
+          borderColor: "#3498DB", backgroundColor: "rgba(52,152,219,0.1)", fill: true, pointRadius: 1 }
+      ]},
+    options: { responsive: true, scales: { y: { beginAtZero: true } },
+               plugins: { legend: { labels: { color: "#c9d1d9" } } } }
+  });
+}
+
+function renderTable(data) {
+  const body = document.getElementById("logBody");
+  body.innerHTML = data.map(r => {
+    const sensitive = r.sensitive_patterns ? `<span class="sensitive">${r.sensitive_patterns}</span>` : '';
+    let tools = '';
+    try { tools = JSON.parse(r.tool_calls||"[]").map(t => `<span class="tool-tag">${t}</span>`).join(''); } catch(e){}
+    const ts = r.timestamp ? r.timestamp.split("T")[1]?.substring(0,8) || r.timestamp : '';
+    return `<tr>
+      <td>${r.turn_number||''}</td><td>${ts}</td>
+      <td>${r.destination_service||''}</td><td>${(r.model||'').substring(0,20)}</td>
+      <td>${parseInt(r.input_tokens||0).toLocaleString()}</td>
+      <td>${parseInt(r.output_tokens||0).toLocaleString()}</td>
+      <td>$${parseFloat(r.estimated_cost_usd||0).toFixed(4)}</td>
+      <td>${r.latency_ms||''}ms</td>
+      <td>${tools}</td>
+      <td title="${(r.last_user_msg_preview||'').replace(/"/g,'&quot;')}">${(r.last_user_msg_preview||'').substring(0,60)}</td>
+      <td>${sensitive}</td>
+    </tr>`;
+  }).join('');
+}
+
+function sortTable(col) {
+  if (sortCol === col) sortAsc = !sortAsc; else { sortCol = col; sortAsc = true; }
+  const keys = ['turn_number','timestamp','destination_service','model','input_tokens',
+    'output_tokens','estimated_cost_usd','latency_ms','tool_calls','last_user_msg_preview','sensitive_patterns'];
+  const key = keys[col];
+  const numKeys = new Set(['turn_number','input_tokens','output_tokens','estimated_cost_usd','latency_ms']);
+  allData.sort((a, b) => {
+    let va = a[key]||'', vb = b[key]||'';
+    if (numKeys.has(key)) { va = parseFloat(va)||0; vb = parseFloat(vb)||0; }
+    return sortAsc ? (va > vb ? 1 : -1) : (va < vb ? 1 : -1);
+  });
+  renderAll();
+}
+
+document.getElementById("filterService").addEventListener("change", renderAll);
+document.getElementById("filterModel").addEventListener("change", renderAll);
+document.getElementById("filterSearch").addEventListener("input", renderAll);
+
+loadData();
+setInterval(loadData, 10000);  // auto-refresh every 10s
+</script>
+</body>
+</html>

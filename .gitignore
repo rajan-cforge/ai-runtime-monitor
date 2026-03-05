@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+src/claude_monitoring/_version.py
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project data (local only)
+*.db
+*.db-wal
+*.db-shm
+claude_watch_output/
+
+# Test / coverage
+.coverage
+htmlcov/
+coverage.xml
+.pytest_cache/
+
+# Build
+*.so
+MANIFEST
+
+# Ruff
+.ruff_cache/
+
+# Claude
+.claude/

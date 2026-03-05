@@ -1,0 +1,1299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Runtime Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<style>
+:root {
+  --bg: #0d1117; --surface: #161b22; --surface2: #21262d;
+  --border: #30363d; --text: #e6edf3; --text2: #8b949e;
+  --blue: #58a6ff; --green: #3fb950; --orange: #d29922;
+  --red: #f85149; --purple: #bc8cff; --cyan: #39d2c0;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; font-size:14px; }
+.header { background:var(--surface); border-bottom:1px solid var(--border); padding:12px 24px; display:flex; align-items:center; justify-content:space-between; }
+.header h1 { font-size:18px; font-weight:600; }
+.header h1 span { color:var(--green); }
+.header .status { display:flex; gap:8px; align-items:center; }
+.header .dot { width:8px; height:8px; border-radius:50%; background:var(--green); animation:pulse 2s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+.stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; padding:16px 24px; }
+.stat-card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px; cursor:pointer; transition:border-color 0.2s,transform 0.15s; }
+.stat-card:hover { border-color:var(--blue); transform:translateY(-1px); }
+.stat-card .label { font-size:11px; color:var(--text2); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px; }
+.stat-card .value { font-size:24px; font-weight:700; }
+.stat-card .value.cost { color:var(--green); }
+.stat-card .value.alert { color:var(--red); }
+.stat-card .value.blue { color:var(--blue); }
+.stat-card .value.purple { color:var(--purple); }
+
+.tabs { display:flex; gap:0; border-bottom:1px solid var(--border); padding:0 24px; background:var(--surface); }
+.tab { padding:10px 20px; cursor:pointer; color:var(--text2); border-bottom:2px solid transparent; font-size:13px; font-weight:500; transition:all 0.2s; }
+.tab:hover { color:var(--text); }
+.tab.active { color:var(--blue); border-bottom-color:var(--blue); }
+
+.content { padding:16px 24px; }
+.panel { display:none; }
+.panel.active { display:block; }
+
+/* Session Explorer */
+.explorer { display:grid; grid-template-columns:380px 1fr; gap:16px; height:calc(100vh - 220px); }
+.session-list { background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow-y:auto; }
+.session-list-header { padding:8px; border-bottom:1px solid var(--border); display:flex; flex-direction:column; gap:6px; }
+.session-list-header .search-row { display:flex; gap:6px; }
+.session-list-header input { flex:1; background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:8px; color:var(--text); font-size:13px; }
+.session-list-header select { background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:6px 8px; color:var(--text); font-size:12px; cursor:pointer; }
+.session-item { padding:10px 12px; border-bottom:1px solid var(--border); cursor:pointer; transition:background 0.15s; }
+.session-item:hover { background:var(--surface2); }
+.session-item.active { background:var(--surface2); border-left:3px solid var(--blue); }
+.session-item.browser { border-left:3px solid var(--purple); }
+.session-item .title { font-size:13px; font-weight:500; color:var(--text); line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.session-item .meta { font-size:11px; color:var(--text2); margin-top:4px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.session-item .meta .project-badge { background:var(--surface2); border:1px solid var(--border); border-radius:3px; padding:1px 5px; font-size:10px; color:var(--cyan); }
+.session-item .stats-row { display:flex; gap:10px; margin-top:4px; font-size:11px; }
+.session-item .stats-row span { color:var(--text2); }
+.session-item .service-badge { display:inline-block; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:600; background:#2d1f3d; color:var(--purple); }
+
+.session-detail { background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow-y:auto; padding:16px; }
+.session-detail .header-bar { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid var(--border); }
+
+.event-block { margin-bottom:12px; border-radius:6px; overflow:hidden; border:1px solid var(--border); }
+.event-block .event-header { padding:8px 12px; font-size:12px; font-weight:600; display:flex; justify-content:space-between; align-items:center; cursor:pointer; }
+.event-block .event-body { padding:12px; font-size:13px; line-height:1.5; max-height:400px; overflow-y:auto; }
+.event-block .event-body pre { white-space:pre-wrap; word-break:break-word; font-family:'SF Mono',Monaco,monospace; font-size:12px; }
+.event-block.user .event-header { background:#1a2332; color:var(--blue); }
+.event-block.assistant .event-header { background:#1a2e1a; color:var(--green); }
+.event-block.thinking .event-header { background:#2d1f3d; color:var(--purple); }
+.event-block.tool_use .event-header { background:#2d2a1a; color:var(--orange); }
+.event-block.tool_result .event-header { background:#1a2d2d; color:var(--cyan); }
+.event-block.token_usage .event-header { background:var(--surface2); color:var(--text2); }
+.event-block.sensitive .event-header { background:#3d1a1a; color:var(--red); }
+.collapsed .event-body { display:none; }
+
+/* Live Feed */
+.feed { background:var(--surface); border:1px solid var(--border); border-radius:8px; height:calc(100vh - 260px); overflow-y:auto; font-family:'SF Mono',Monaco,monospace; font-size:12px; }
+.feed-controls { display:flex; gap:12px; margin-bottom:8px; align-items:center; }
+.feed-controls label { font-size:12px; color:var(--text2); display:flex; align-items:center; gap:4px; }
+.feed-item { padding:6px 12px; border-bottom:1px solid var(--border); display:flex; gap:12px; align-items:flex-start; }
+.feed-item:hover { background:var(--surface2); }
+.feed-item .time { color:var(--text2); flex-shrink:0; width:80px; }
+.feed-item .icon { flex-shrink:0; width:20px; text-align:center; }
+.feed-item .type { flex-shrink:0; width:100px; font-weight:600; }
+.feed-item .detail { color:var(--text); flex:1; word-break:break-word; }
+.feed-item .session-ctx { color:var(--cyan); font-size:11px; }
+.feed-item.user_prompt .type { color:var(--blue); }
+.feed-item.assistant_response .type { color:var(--green); }
+.feed-item.thinking .type { color:var(--purple); }
+.feed-item.tool_use .type { color:var(--orange); }
+.feed-item.tool_result .type { color:var(--cyan); }
+.feed-item.token_usage .type { color:var(--text2); }
+.feed-item.sensitive_data .type { color:var(--red); }
+.feed-item.process_start .type,.feed-item.process_stop .type { color:var(--purple); }
+.feed-item.connection .type { color:var(--cyan); }
+.feed-item.browser_ai .type { color:var(--purple); }
+
+/* Analytics */
+.charts { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.chart-card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px; overflow:visible; position:relative; }
+.chart-card h3 { font-size:13px; color:var(--text2); margin-bottom:12px; }
+.chart-card canvas { max-height:250px; }
+.charts-full { grid-column:1/-1; }
+
+/* System */
+.data-table { width:100%; border-collapse:collapse; background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+.data-table th { background:var(--surface2); padding:10px 12px; text-align:left; font-size:12px; color:var(--text2); border-bottom:1px solid var(--border); }
+.data-table td { padding:8px 12px; border-bottom:1px solid var(--border); font-size:13px; }
+.data-table tr:hover td { background:var(--surface2); }
+.badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600; }
+.badge.running { background:#1a2e1a; color:var(--green); }
+.badge.terminated { background:#3d1a1a; color:var(--red); }
+.badge.cli { background:#1a2332; color:var(--blue); }
+.badge.desktop { background:#2d1f3d; color:var(--purple); }
+.badge.browser { background:#1a2d2d; color:var(--cyan); }
+
+.system-grid { display:grid; grid-template-columns:1fr; gap:16px; }
+.system-section { margin-bottom:16px; }
+.system-section h3 { font-size:14px; margin-bottom:8px; color:var(--text2); }
+
+.empty { text-align:center; padding:48px; color:var(--text2); }
+
+/* Alerts */
+.alert-item { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:12px 16px; margin-bottom:8px; border-left:3px solid var(--red); }
+.alert-item:hover { border-color:var(--red); }
+.alert-item .alert-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+.alert-item .alert-patterns { font-weight:600; color:var(--red); font-size:13px; }
+.alert-item .alert-meta { font-size:11px; color:var(--text2); }
+.alert-item .alert-context { font-size:12px; color:var(--text2); margin-bottom:4px; }
+.alert-item .alert-snippet { font-size:12px; font-family:'SF Mono',Monaco,monospace; color:var(--text); background:var(--surface2); padding:8px; border-radius:4px; max-height:80px; overflow-y:auto; white-space:pre-wrap; word-break:break-word; }
+.alert-item .alert-session { font-size:11px; color:var(--cyan); cursor:pointer; }
+.alert-item .alert-session:hover { text-decoration:underline; }
+
+/* Source badges */
+.source-badge { display:inline-block; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:600; margin-right:4px; }
+.source-badge.cli { background:#1a2332; color:var(--blue); }
+.source-badge.browser { background:#2d1f3d; color:var(--purple); }
+.source-badge.desktop { background:#1a2d2d; color:var(--cyan); }
+.source-badge.network { background:#2d2a1a; color:var(--orange); }
+.session-item.browser.active { border-left-color:var(--purple); background:var(--surface2); }
+
+/* Deep Dive Cockpit */
+.deepdive-overlay { position:fixed; top:0; left:0; right:0; bottom:0; z-index:200;
+  background:var(--bg); display:none; flex-direction:column; }
+.deepdive-overlay.open { display:flex; }
+.deepdive-toolbar { background:var(--surface); border-bottom:1px solid var(--border);
+  padding:8px 16px; display:flex; justify-content:space-between; align-items:center; }
+.deepdive-body { display:flex; flex:1; overflow:hidden; }
+
+/* Left: Turn Rail (18%) */
+.turn-rail { width:18%; border-right:1px solid var(--border); overflow-y:auto;
+  background:var(--surface); }
+.turn-rail-item { padding:8px 10px; border-bottom:1px solid var(--border);
+  cursor:pointer; font-size:12px; transition:background 0.15s; }
+.turn-rail-item:hover { background:var(--surface2); }
+.turn-rail-item.active { background:var(--surface2); border-left:3px solid var(--blue); }
+.turn-rail-item.has-alert { border-left:3px solid var(--red); }
+.turn-rail-item .turn-num { font-weight:600; color:var(--blue); }
+.turn-rail-item .turn-preview { color:var(--text2); font-size:11px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.turn-rail-item .turn-tools { display:flex; gap:3px; margin-top:2px; flex-wrap:wrap; }
+.turn-rail-item .turn-tools .tool-chip { font-size:10px; padding:1px 4px;
+  border-radius:3px; background:var(--surface2); color:var(--orange); }
+
+/* Center: API Round-Trip Inspector (52%) */
+.api-inspector { width:52%; overflow-y:auto; padding:16px; }
+.api-inspector .turn-header { font-size:14px; font-weight:600; margin-bottom:12px;
+  padding-bottom:8px; border-bottom:1px solid var(--border); }
+
+/* Right: Context & Signals (30%) */
+.context-panel { width:30%; border-left:1px solid var(--border); overflow-y:auto;
+  padding:12px; background:var(--surface); }
+.context-panel h4 { font-size:12px; color:var(--text2); text-transform:uppercase;
+  letter-spacing:0.5px; margin:12px 0 6px; }
+.context-gauge { height:8px; background:var(--surface2); border-radius:4px;
+  overflow:hidden; margin-bottom:12px; }
+.context-gauge-fill { height:100%; border-radius:4px; transition:width 0.3s; }
+.timing-bar { display:flex; align-items:center; gap:6px; margin-bottom:4px; font-size:11px; }
+.timing-bar-fill { height:6px; border-radius:3px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>AI Runtime <span>Monitor</span></h1>
+  <div style="display:flex;gap:12px;align-items:center">
+    <div class="export-menu" style="position:relative">
+      <button onclick="document.getElementById('export-dropdown').style.display=document.getElementById('export-dropdown').style.display==='block'?'none':'block'" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 12px;color:var(--text);font-size:12px;cursor:pointer">Export</button>
+      <div id="export-dropdown" style="display:none;position:absolute;right:0;top:32px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:4px 0;min-width:180px;z-index:100;box-shadow:0 4px 12px rgba(0,0,0,0.3)">
+        <div style="padding:4px 12px;font-size:11px;color:var(--text2);text-transform:uppercase">JSON</div>
+        <a onclick="exportData('sessions','json')" style="display:block;padding:6px 12px;color:var(--text);font-size:13px;cursor:pointer;text-decoration:none">Sessions</a>
+        <a onclick="exportData('events','json')" style="display:block;padding:6px 12px;color:var(--text);font-size:13px;cursor:pointer;text-decoration:none">Events</a>
+        <a onclick="exportData('alerts','json')" style="display:block;padding:6px 12px;color:var(--text);font-size:13px;cursor:pointer;text-decoration:none">Alerts</a>
+        <a onclick="exportData('connections','json')" style="display:block;padding:6px 12px;color:var(--text);font-size:13px;cursor:pointer;text-decoration:none">Connections</a>
+        <div style="border-top:1px solid var(--border);margin:4px 0"></div>
+        <div style="padding:4px 12px;font-size:11px;color:var(--text2);text-transform:uppercase">NDJSON (SIEM)</div>
+        <a onclick="exportData('sessions','ndjson')" style="display:block;padding:6px 12px;color:var(--text);font-size:13px;cursor:pointer;text-decoration:none">Sessions</a>
+        <a onclick="exportData('events','ndjson')" style="display:block;padding:6px 12px;color:var(--text);font-size:13px;cursor:pointer;text-decoration:none">Events</a>
+        <a onclick="exportData('alerts','ndjson')" style="display:block;padding:6px 12px;color:var(--text);font-size:13px;cursor:pointer;text-decoration:none">Alerts</a>
+      </div>
+    </div>
+    <div class="status"><div class="dot"></div><span style="font-size:12px;color:var(--text2)">Monitoring</span></div>
+  </div>
+</div>
+
+<div class="stats" id="stat-cards">
+  <div class="stat-card" onclick="switchTab('explorer')"><div class="label">Sessions</div><div class="value blue" id="st-sessions">-</div></div>
+  <div class="stat-card" onclick="switchTab('system')"><div class="label">Active Agents</div><div class="value" id="st-agents">-</div></div>
+  <div class="stat-card" onclick="switchTab('analytics')"><div class="label">Input Tokens</div><div class="value" id="st-input">-</div></div>
+  <div class="stat-card" onclick="switchTab('analytics')"><div class="label">Output Tokens</div><div class="value" id="st-output">-</div></div>
+  <div class="stat-card" onclick="switchTab('analytics')"><div class="label" id="st-cost-label">Total Cost</div><div class="value cost" id="st-cost">-</div></div>
+  <div class="stat-card" onclick="switchTab('analytics')"><div class="label">Burn Rate</div><div class="value" id="st-burnrate" style="font-size:18px">-</div></div>
+  <div class="stat-card" onclick="switchTab('explorer')"><div class="label">Browser AI</div><div class="value purple" id="st-browser">-</div></div>
+  <div class="stat-card" onclick="switchTab('alerts')"><div class="label">Alerts</div><div class="value alert" id="st-alerts">-</div></div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="explorer">Session Explorer</div>
+  <div class="tab" data-tab="feed">Live Feed</div>
+  <div class="tab" data-tab="analytics">Analytics</div>
+  <div class="tab" data-tab="system">System</div>
+  <div class="tab" data-tab="timeline">Activity Timeline</div>
+  <div class="tab" data-tab="alerts">Alerts</div>
+</div>
+
+<div class="content">
+  <!-- Session Explorer -->
+  <div class="panel active" id="panel-explorer">
+    <div class="explorer">
+      <div class="session-list">
+        <div class="session-list-header">
+          <div class="search-row">
+            <input type="text" id="session-search" placeholder="Search by content, model, project...">
+            <select id="session-source" onchange="loadSessions()" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-size:12px;cursor:pointer">
+              <option value="all">All Sources</option>
+              <option value="cli">CLI Sessions</option>
+              <option value="browser">Browser AI</option>
+            </select>
+            <select id="session-sort" onchange="loadSessions()">
+              <option value="recent">Recent Activity</option>
+              <option value="newest">Newest First</option>
+              <option value="turns">Most Turns</option>
+              <option value="tokens">Most Tokens</option>
+            </select>
+          </div>
+        </div>
+        <div id="session-list-items"></div>
+      </div>
+      <div class="session-detail" id="session-detail">
+        <div class="empty">Select a session to view its full conversation timeline</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Live Feed -->
+  <div class="panel" id="panel-feed">
+    <div class="feed-controls">
+      <label><input type="checkbox" id="feed-auto-scroll" checked> Auto-scroll</label>
+      <label><input type="checkbox" id="feed-show-tokens"> Show token events</label>
+    </div>
+    <div class="feed" id="feed-container"></div>
+  </div>
+
+  <!-- Analytics -->
+  <div class="panel" id="panel-analytics">
+    <div class="charts">
+      <div class="chart-card"><h3>Token Usage (24h)</h3><canvas id="chart-tokens"></canvas></div>
+      <div class="chart-card"><h3>Cost Over Time (24h)</h3><canvas id="chart-cost"></canvas></div>
+      <div class="chart-card"><h3>Tool Usage</h3><canvas id="chart-tools"></canvas></div>
+      <div class="chart-card"><h3>Model Usage</h3><canvas id="chart-models"></canvas></div>
+      <div class="chart-card charts-full"><h3>Daily Token Burn Rate (14 days) <span id="forecast-label" style="font-weight:normal;font-size:12px;color:var(--text2)"></span></h3><canvas id="chart-burnrate"></canvas></div>
+      <div class="chart-card charts-full"><h3>Browser AI Usage (7 days)</h3><canvas id="chart-browser"></canvas></div>
+    </div>
+  </div>
+
+  <!-- System -->
+  <div class="panel" id="panel-system">
+    <div class="system-grid">
+      <div class="system-section">
+        <h3>Running AI Processes</h3>
+        <table class="data-table" id="proc-table">
+          <thead><tr><th>PID</th><th>Name</th><th>Source</th><th>CPU%</th><th>MEM%</th><th>Uptime</th><th>Status</th><th>Command</th></tr></thead>
+          <tbody id="proc-tbody"></tbody>
+        </table>
+      </div>
+      <div class="system-section">
+        <h3>Network Connections</h3>
+        <table class="data-table" id="conn-table">
+          <thead><tr><th>Time</th><th>Process</th><th>Remote Host</th><th>Port</th><th>Service</th></tr></thead>
+          <tbody id="conn-tbody"></tbody>
+        </table>
+      </div>
+      <div class="system-section">
+        <h3>Recent File Activity</h3>
+        <table class="data-table" id="file-table">
+          <thead><tr><th>Time</th><th>Operation</th><th>Path</th><th>Size</th></tr></thead>
+          <tbody id="file-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Activity Timeline -->
+  <div class="panel" id="panel-timeline">
+    <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
+      <select id="timeline-source" onchange="loadTimeline()" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-size:12px;cursor:pointer">
+        <option value="">All Sources</option>
+        <option value="cli">CLI Sessions</option>
+        <option value="browser">Browser AI</option>
+        <option value="network">Network</option>
+      </select>
+      <span id="timeline-count" style="font-size:12px;color:var(--text2)"></span>
+    </div>
+    <div class="feed" id="timeline-container" style="height:calc(100vh - 280px)"></div>
+  </div>
+
+  <!-- Alerts -->
+  <div class="panel" id="panel-alerts">
+    <div class="system-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h3>Security Alerts <span id="alerts-count" style="color:var(--text2);font-weight:normal;font-size:12px"></span></h3>
+        <div style="display:flex;gap:8px">
+          <select id="alert-severity-filter" onchange="loadAlerts()" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:4px 8px;color:var(--text);font-size:12px">
+            <option value="">All Severities</option>
+            <option value="critical">Critical</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+          <select id="alert-category-filter" onchange="loadAlerts()" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:4px 8px;color:var(--text);font-size:12px">
+            <option value="">All Categories</option>
+            <option value="credential">Credentials</option>
+            <option value="pii">PII</option>
+            <option value="policy">Policy</option>
+          </select>
+        </div>
+      </div>
+      <div id="alerts-severity-bar" style="margin-bottom:12px"></div>
+      <div id="alerts-list" style="max-height:calc(100vh - 320px);overflow-y:auto"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Deep Dive Cockpit -->
+<div class="deepdive-overlay" id="deepdive-overlay">
+  <div class="deepdive-toolbar">
+    <div style="display:flex;align-items:center;gap:12px">
+      <button onclick="closeDeepDive()" style="background:none;border:none;color:var(--text);font-size:18px;cursor:pointer">&times;</button>
+      <strong id="dd-title" style="font-size:14px"></strong>
+      <span id="dd-meta" style="font-size:12px;color:var(--text2)"></span>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span style="font-size:12px;color:var(--text2)">
+        <kbd style="background:var(--surface2);padding:1px 5px;border-radius:3px;border:1px solid var(--border)">&#x2191;</kbd><kbd style="background:var(--surface2);padding:1px 5px;border-radius:3px;border:1px solid var(--border)">&#x2193;</kbd> navigate
+        <kbd style="background:var(--surface2);padding:1px 5px;border-radius:3px;border:1px solid var(--border)">E</kbd> expand all
+        <kbd style="background:var(--surface2);padding:1px 5px;border-radius:3px;border:1px solid var(--border)">Esc</kbd> close
+      </span>
+    </div>
+  </div>
+  <div class="deepdive-body">
+    <div class="turn-rail" id="dd-turn-rail"></div>
+    <div class="api-inspector" id="dd-inspector"></div>
+    <div class="context-panel" id="dd-context"></div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let lastFeedTs = '';
+let charts = {};
+let currentPlanInfo = {};
+let sessionTitleMap = {};
+let feedInterval, statsInterval, sessionsInterval;
+
+// Tab switching
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  const tab = document.querySelector('.tab[data-tab="'+name+'"]');
+  if (tab) tab.classList.add('active');
+  document.getElementById('panel-' + name).classList.add('active');
+  if (name === 'system') { loadProcesses(); loadConnections(); loadFiles(); }
+  if (name === 'timeline') { loadTimeline(); }
+  if (name === 'alerts') { loadAlerts(); }
+}
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+});
+
+// Format numbers
+function fmtNum(n) {
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+  return String(n);
+}
+function fmtTime(ts) {
+  if (!ts) return '';
+  try { return new Date(ts).toLocaleTimeString(); } catch(e) { return ts; }
+}
+function fmtDate(ts) {
+  if (!ts) return '';
+  try { return new Date(ts).toLocaleString(); } catch(e) { return ts; }
+}
+function fmtRelative(ts) {
+  if (!ts) return '';
+  try {
+    const now = Date.now();
+    const then = new Date(ts).getTime();
+    const diff = (now - then) / 1000;
+    if (diff < 60) return 'just now';
+    if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+    if (diff < 172800) return 'yesterday';
+    return Math.floor(diff/86400) + 'd ago';
+  } catch(e) { return ts; }
+}
+function fmtDuration(secs) {
+  if (!secs || secs <= 0) return '';
+  if (secs < 60) return Math.round(secs) + 's';
+  if (secs < 3600) return Math.round(secs/60) + 'm';
+  return Math.floor(secs/3600) + 'h ' + Math.round((secs%3600)/60) + 'm';
+}
+function projectName(cwd) {
+  if (!cwd) return '';
+  const parts = cwd.replace(/\\/g,'/').split('/').filter(Boolean);
+  return parts[parts.length-1] || '';
+}
+
+// Escape HTML
+function esc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Load stats
+async function loadStats() {
+  try {
+    const r = await fetch(API + '/api/stats');
+    const d = await r.json();
+    document.getElementById('st-sessions').textContent = d.total_sessions;
+    document.getElementById('st-agents').textContent = d.active_processes;
+    document.getElementById('st-input').textContent = fmtNum(d.total_input_tokens);
+    document.getElementById('st-output').textContent = fmtNum(d.total_output_tokens);
+    document.getElementById('st-alerts').textContent = d.total_alerts;
+
+    // Plan-aware cost display
+    currentPlanInfo = d.plan_info || {};
+    const costLabel = document.getElementById('st-cost-label');
+    const costValue = document.getElementById('st-cost');
+    if (currentPlanInfo.is_subscription) {
+      costLabel.textContent = currentPlanInfo.cost_label || 'Subscription';
+      costValue.textContent = fmtNum(d.total_input_tokens + d.total_output_tokens) + ' tok';
+      costValue.className = 'value green';
+    } else {
+      costLabel.textContent = 'Total Cost';
+      costValue.textContent = '$' + d.total_cost.toFixed(2);
+      costValue.className = 'value cost';
+    }
+
+    // Browser AI
+    const browserEl = document.getElementById('st-browser');
+    if (d.browser_today > 0) {
+      browserEl.textContent = d.browser_today + ' visits';
+    } else {
+      browserEl.textContent = '0';
+    }
+
+    // Burn rate
+    const fc = d.forecast || {};
+    const burnEl = document.getElementById('st-burnrate');
+    if (fc.daily_burn_rate > 0) {
+      burnEl.textContent = fmtNum(fc.daily_burn_rate) + '/d';
+      const trendIcon = fc.burn_trend === 'increasing' ? ' ^' : fc.burn_trend === 'decreasing' ? ' v' : '';
+      burnEl.style.color = fc.burn_trend === 'increasing' ? 'var(--orange)' : fc.burn_trend === 'decreasing' ? 'var(--green)' : 'var(--text)';
+      if (fc.days_remaining !== null && fc.days_remaining !== undefined) {
+        burnEl.title = fc.days_remaining === 0 ? 'Quota exceeded' : fc.days_remaining + ' days remaining at current rate';
+      }
+    } else {
+      burnEl.textContent = '-';
+    }
+
+    updateCharts(d);
+  } catch(e) {}
+}
+
+// Load sessions
+async function loadSessions() {
+  try {
+    const search = document.getElementById('session-search').value.trim();
+    const sort = document.getElementById('session-sort').value;
+    const source = document.getElementById('session-source').value;
+    let url = API + '/api/sessions?sort=' + sort + '&include_browser=true';
+    if (source && source !== 'all') url += '&source=' + source;
+    if (search) url += '&q=' + encodeURIComponent(search);
+    const r = await fetch(url);
+    const d = await r.json();
+    const container = document.getElementById('session-list-items');
+
+    // Build title map for feed
+    d.sessions.forEach(s => { if (s.title) sessionTitleMap[s.session_id] = s.title; });
+
+    container.innerHTML = d.sessions.map(s => {
+      const isBrowser = s.source === 'browser';
+      const title = s.title || (isBrowser ? (s.service || 'Browser') : s.session_id.substring(0,8));
+      const proj = isBrowser ? '' : projectName(s.cwd);
+      const ago = fmtRelative(s.last_activity);
+      const itemClass = isBrowser ? 'session-item browser' : 'session-item';
+      const clickFn = isBrowser
+        ? "loadBrowserSessionDetail('" + (s.conversation_id || s.session_id) + "')"
+        : "loadSessionDetail('" + s.session_id + "')";
+
+      return '<div class="' + itemClass + '" data-id="'+s.session_id+'" onclick="' + clickFn + '">'
+        + '<div class="title">'
+        + (isBrowser ? '<span class="service-badge" style="background:#2d1f3d;color:var(--purple)">' + esc(s.service || s.model) + '</span> ' : '')
+        + esc(title) + '</div>'
+        + '<div class="meta">'
+        + '<span>' + (isBrowser ? esc(s.service || '') : (s.model||'unknown').replace('claude-','')) + '</span>'
+        + '<span style="color:var(--text2)">' + (isBrowser ? (s.conversation_id||'').substring(0,12) : s.session_id.substring(0,8)) + '</span>'
+        + (proj ? '<span class="project-badge">'+esc(proj)+'</span>' : '')
+        + '</div>'
+        + '<div class="stats-row">'
+        + '<span>' + (isBrowser ? (s.total_turns||0) + ' visits' : s.total_turns + ' turns') + '</span>'
+        + (isBrowser ? (s.total_duration > 0 ? '<span>' + fmtDuration(s.total_duration) + '</span>' : '') : '<span>' + fmtNum(s.total_input_tokens||0) + ' tokens</span>')
+        + '<span>' + ago + '</span>'
+        + (!isBrowser && s.alert_count > 0 ? '<span style="color:var(--red);font-size:11px">&#x26a0; '+s.alert_count+'</span>' : '')
+        + '</div></div>';
+    }).join('');
+  } catch(e) {}
+}
+
+// Load session detail
+async function loadSessionDetail(id) {
+  document.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
+  const item = document.querySelector('.session-item[data-id="'+id+'"]');
+  if (item) item.classList.add('active');
+
+  const container = document.getElementById('session-detail');
+  container.innerHTML = '<div class="empty">Loading...</div>';
+
+  try {
+    const r = await fetch(API + '/api/session/' + id);
+    const d = await r.json();
+    const s = d.session;
+    const title = s.title || s.session_id.substring(0,8);
+    const proj = projectName(s.cwd);
+    let html = '<div class="header-bar"><div>'
+      + '<strong>'+esc(title)+'</strong>'
+      + '<div style="font-size:12px;color:var(--text2);margin-top:4px">'
+      + (s.model||'') + ' &middot; ' + s.session_id.substring(0,8)
+      + (proj ? ' &middot; '+esc(proj) : '')
+      + '</div></div>'
+      + '<div style="display:flex;gap:12px;align-items:center">'
+      + '<span style="font-size:12px;color:var(--text2)">'
+      + s.total_turns+' turns &middot; '+fmtNum(s.total_input_tokens||0)+' tokens</span>'
+      + '<button onclick="openDeepDive(\'' + s.session_id + '\')" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:4px 10px;color:var(--blue);font-size:12px;cursor:pointer;font-weight:600">&#x1f52c; Deep Dive</button>'
+      + '</div></div>';
+
+    let turnNum = 0;
+    for (const ev of d.events) {
+      const data = ev.data;
+      const time = fmtTime(ev.timestamp);
+      switch(ev.event_type) {
+        case 'user_prompt':
+          turnNum++;
+          html += '<div class="event-block user">'
+            + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+            + '<span>&#x1f464; USER (Turn '+turnNum+', '+time+')</span></div>'
+            + '<div class="event-body"><pre>'+esc(data.text)+'</pre></div></div>';
+          break;
+        case 'thinking':
+          html += '<div class="event-block thinking collapsed">'
+            + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+            + '<span>&#x1f9e0; THINKING ('+(data.length||0)+' chars)</span>'
+            + '<span style="font-size:11px">click to expand</span></div>'
+            + '<div class="event-body"><pre>'+esc(data.text)+'</pre></div></div>';
+          break;
+        case 'assistant_response':
+          html += '<div class="event-block assistant">'
+            + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+            + '<span>&#x1f916; CLAUDE ('+time+')</span></div>'
+            + '<div class="event-body"><pre>'+esc(data.text)+'</pre></div></div>';
+          break;
+        case 'tool_use':
+          const inputStr = typeof data.input === 'object' ? JSON.stringify(data.input, null, 2) : String(data.input||'');
+          html += '<div class="event-block tool_use collapsed">'
+            + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+            + '<span>&#x1f527; TOOL: '+esc(data.name)+'</span>'
+            + '<span style="font-size:11px;color:var(--text2)">'+esc((data.input_preview||'').substring(0,60))+'</span></div>'
+            + '<div class="event-body"><pre>'+esc(inputStr)+'</pre></div></div>';
+          break;
+        case 'tool_result':
+          html += '<div class="event-block tool_result collapsed">'
+            + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+            + '<span>&#x1f4c4; RESULT ('+(data.length||0)+' chars)'+(data.is_error ? ' &#x274c; ERROR' : '')+'</span>'
+            + '<span style="font-size:11px">click to expand</span></div>'
+            + '<div class="event-body"><pre>'+esc(data.content)+'</pre></div></div>';
+          break;
+        case 'token_usage':
+          html += '<div class="event-block token_usage collapsed">'
+            + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+            + '<span>&#x1f4ca; Tokens: &#x2191;'+fmtNum(data.input_tokens||0)+' in &#x2193;'+fmtNum(data.output_tokens||0)+' out'
+            + (currentPlanInfo.is_subscription ? '' : ' &middot; $'+(data.cost||0).toFixed(4))+'</span></div>'
+            + '<div class="event-body"><pre>Model: '+esc(data.model)
+            + '\nInput: '+data.input_tokens+' (cache read: '+(data.cache_read_tokens||0)+', cache write: '+(data.cache_write_tokens||0)+')'
+            + '\nOutput: '+data.output_tokens
+            + (currentPlanInfo.is_subscription ? '' : '\nCost: $'+(data.cost||0).toFixed(6))
+            + '\nStop reason: '+esc(data.stop_reason||'')+'</pre></div></div>';
+          break;
+        case 'sensitive_data':
+          html += '<div class="event-block sensitive">'
+            + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+            + '<span>&#x26a0;&#xfe0f; SENSITIVE DATA DETECTED: '+esc((data.patterns||[]).join(', '))+'</span></div>'
+            + '<div class="event-body"><pre>Context: '+esc(data.context)
+            + '\nPatterns: '+esc((data.patterns||[]).join(', '))
+            + '\nSnippet: '+esc(data.snippet)+'</pre></div></div>';
+          break;
+      }
+    }
+    container.innerHTML = html;
+    container.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+  } catch(e) {
+    container.innerHTML = '<div class="empty">Error loading session<br><button onclick="loadSessionDetail(\'' + id + '\')" style="margin-top:12px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:6px 16px;color:var(--text);font-size:13px;cursor:pointer">Retry</button></div>';
+  }
+}
+
+// Live feed
+const FEED_ICONS = {
+  user_prompt:'&#x1f4e4;', assistant_response:'&#x1f4e5;', thinking:'&#x1f9e0;',
+  tool_use:'&#x1f527;', tool_result:'&#x1f4c4;', token_usage:'&#x1f4ca;',
+  sensitive_data:'&#x26a0;&#xfe0f;', process_start:'&#x1f7e2;', process_stop:'&#x1f534;',
+  connection:'&#x1f310;', file_created:'&#x1f4c1;', file_modified:'&#x270f;&#xfe0f;', file_deleted:'&#x1f5d1;&#xfe0f;',
+  bash_progress:'&#x1f4bb;', system_event:'&#x2699;&#xfe0f;', browser_ai:'&#x1f310;'
+};
+async function pollFeed() {
+  try {
+    const url = API + '/api/feed?limit=50' + (lastFeedTs ? '&since=' + encodeURIComponent(lastFeedTs) : '');
+    const r = await fetch(url);
+    const d = await r.json();
+    const container = document.getElementById('feed-container');
+    const showTokens = document.getElementById('feed-show-tokens').checked;
+
+    for (const ev of d.events) {
+      if (!showTokens && ev.event_type === 'token_usage') continue;
+      const div = document.createElement('div');
+      div.className = 'feed-item ' + ev.event_type;
+      // Show session title context in feed
+      const sessTitle = ev.session_id ? (sessionTitleMap[ev.session_id] || ev.session_id.substring(0,8)) : '';
+      const ctxHtml = sessTitle && ev.session_id ? '<span class="session-ctx">['+esc(sessTitle.substring(0,30))+']</span> ' : '';
+      div.innerHTML = '<span class="time">'+fmtTime(ev.timestamp)+'</span>'
+        + '<span class="icon">'+(FEED_ICONS[ev.event_type]||'&#x2022;')+'</span>'
+        + '<span class="type">'+ev.event_type.replace(/_/g,' ').toUpperCase()+'</span>'
+        + '<span class="detail">'+ctxHtml+esc(ev.summary||'')+'</span>';
+      div.style.cursor = 'pointer';
+      div.onclick = ((evData) => () => {
+        const existing = div.querySelector('.feed-expand');
+        if (existing) { existing.remove(); return; }
+        const detail = document.createElement('div');
+        detail.className = 'feed-expand';
+        detail.style.cssText = 'padding:8px;background:var(--surface2);border-radius:4px;margin-top:4px;font-size:12px;white-space:pre-wrap;grid-column:1/-1';
+        detail.textContent = JSON.stringify(evData, null, 2);
+        div.appendChild(detail);
+      })(ev);
+      container.appendChild(div);
+      lastFeedTs = ev.timestamp;
+    }
+
+    if (d.events.length && document.getElementById('feed-auto-scroll').checked) {
+      container.scrollTop = container.scrollHeight;
+    }
+  } catch(e) {}
+}
+
+// Charts
+function updateCharts(stats) {
+  const chartOpts = {responsive:true,plugins:{legend:{labels:{color:'#e6edf3'}},tooltip:{callbacks:{label:(ctx)=>ctx.dataset.label+': '+fmtNum(ctx.raw)+(ctx.dataset.label.toLowerCase().includes('cost')?' $':' tokens')}}}};
+  // Token timeline
+  const tl = stats.token_timeline || [];
+  const labels = tl.map(t => {
+    try { return new Date(t.hour).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}); }
+    catch(e) { return t.hour; }
+  });
+
+  if (charts.tokens) charts.tokens.destroy();
+  if (tl.length) {
+    charts.tokens = new Chart(document.getElementById('chart-tokens'), {
+      type:'bar', data:{
+        labels, datasets:[
+          {label:'Input',data:tl.map(t=>t.input_t||0),backgroundColor:'rgba(88,166,255,0.7)'},
+          {label:'Output',data:tl.map(t=>t.output_t||0),backgroundColor:'rgba(63,185,80,0.7)'}
+        ]
+      }, options:{...chartOpts,scales:{x:{stacked:true,ticks:{color:'#8b949e'}},y:{stacked:true,ticks:{color:'#8b949e'}}}}
+    });
+  }
+
+  if (charts.cost) charts.cost.destroy();
+  if (tl.length && !currentPlanInfo.is_subscription) {
+    charts.cost = new Chart(document.getElementById('chart-cost'), {
+      type:'line', data:{
+        labels, datasets:[{label:'Cost ($)',data:tl.map(t=>t.cost||0),borderColor:'#3fb950',backgroundColor:'rgba(63,185,80,0.1)',fill:true,tension:0.3}]
+      }, options:{...chartOpts,scales:{x:{ticks:{color:'#8b949e'}},y:{ticks:{color:'#8b949e'}}}}
+    });
+  } else if (tl.length) {
+    // For subscription users, show token volume instead of cost
+    charts.cost = new Chart(document.getElementById('chart-cost'), {
+      type:'line', data:{
+        labels, datasets:[{label:'Tokens (included in plan)',data:tl.map(t=>(t.input_t||0)+(t.output_t||0)),borderColor:'#3fb950',backgroundColor:'rgba(63,185,80,0.1)',fill:true,tension:0.3}]
+      }, options:{...chartOpts,scales:{x:{ticks:{color:'#8b949e'}},y:{ticks:{color:'#8b949e'}}}}
+    });
+  }
+
+  // Tool counts
+  const tc = stats.tool_counts || [];
+  if (charts.tools) charts.tools.destroy();
+  if (tc.length) {
+    const colors = ['#58a6ff','#3fb950','#d29922','#f85149','#bc8cff','#39d2c0','#f0883e','#a5d6ff'];
+    charts.tools = new Chart(document.getElementById('chart-tools'), {
+      type:'doughnut', data:{
+        labels:tc.map(t=>t.tool||'?'), datasets:[{data:tc.map(t=>t.cnt),backgroundColor:tc.map((_,i)=>colors[i%colors.length])}]
+      }, options:{...chartOpts,plugins:{legend:{position:'right',labels:{color:'#e6edf3',font:{size:11}}}}}
+    });
+  }
+
+  // Model usage
+  const mu = stats.model_usage || [];
+  if (charts.models) charts.models.destroy();
+  if (mu.length) {
+    charts.models = new Chart(document.getElementById('chart-models'), {
+      type:'bar', data:{
+        labels:mu.map(m=>m.model?m.model.replace('claude-',''):'?'),
+        datasets:[{label:'Sessions',data:mu.map(m=>m.sessions||0),backgroundColor:'rgba(88,166,255,0.7)'}]
+      }, options:{...chartOpts,indexAxis:'y',scales:{x:{ticks:{color:'#8b949e'}},y:{ticks:{color:'#e6edf3',font:{size:11}}}}}
+    });
+  }
+
+  // Burn rate chart
+  const fc = stats.forecast || {};
+  const bd2 = fc.daily_breakdown || [];
+  if (charts.burnrate) charts.burnrate.destroy();
+  if (bd2.length) {
+    const brLabels = bd2.map(d => d.day);
+    const datasets2 = [
+      {label:'Input',data:bd2.map(d=>d.input_tokens||0),backgroundColor:'rgba(88,166,255,0.7)'},
+      {label:'Output',data:bd2.map(d=>d.output_tokens||0),backgroundColor:'rgba(63,185,80,0.7)'}
+    ];
+    // Add limit line if subscription
+    if (fc.monthly_limit) {
+      const dailyLimit = Math.round(fc.monthly_limit / 30);
+      datasets2.push({
+        label:'Daily quota (est.)',
+        data:brLabels.map(() => dailyLimit),
+        type:'line',borderColor:'var(--red)',borderDash:[5,5],pointRadius:0,fill:false
+      });
+    }
+    charts.burnrate = new Chart(document.getElementById('chart-burnrate'), {
+      type:'bar', data:{labels:brLabels, datasets:datasets2},
+      options:{...chartOpts,scales:{x:{stacked:true,ticks:{color:'#8b949e'}},y:{stacked:true,ticks:{color:'#8b949e'}}}}
+    });
+    // Forecast label
+    const flabel = document.getElementById('forecast-label');
+    if (fc.days_remaining !== null && fc.days_remaining !== undefined) {
+      const daysText = fc.days_remaining === 0
+        ? 'Quota exceeded (' + (fc.monthly_used && fc.monthly_limit ? (fc.monthly_used / fc.monthly_limit).toFixed(1) + '\u00d7 limit' : 'over limit') + ')'
+        : '~' + fc.days_remaining + ' days remaining';
+      flabel.textContent = 'Avg: ' + fmtNum(fc.avg_7d_burn) + ' tok/day | Trend: ' + fc.burn_trend
+        + ' | ' + daysText;
+      flabel.style.color = fc.days_remaining === 0 ? 'var(--red)' : fc.days_remaining < 7 ? 'var(--red)' : fc.days_remaining < 14 ? 'var(--orange)' : 'var(--text2)';
+    } else {
+      flabel.textContent = 'Avg: ' + fmtNum(fc.avg_7d_burn) + ' tok/day | Trend: ' + fc.burn_trend;
+    }
+  }
+
+  // Browser AI chart
+  const bd = stats.browser_daily || [];
+  if (charts.browser) charts.browser.destroy();
+  if (bd.length) {
+    const services = [...new Set(bd.map(b=>b.service))];
+    const days = [...new Set(bd.map(b=>b.day))].sort();
+    const svcColors = {'ChatGPT':'#74aa9c','Gemini':'#4285f4','Claude Web':'#d97706','Perplexity':'#20b2aa','Copilot':'#6366f1','AI Studio':'#ea4335','DeepSeek':'#3b82f6'};
+    const datasets = services.map(svc => ({
+      label:svc,
+      data:days.map(day => { const m = bd.find(b=>b.service===svc&&b.day===day); return m ? m.visits : 0; }),
+      backgroundColor:svcColors[svc]||'#8b949e'
+    }));
+    charts.browser = new Chart(document.getElementById('chart-browser'), {
+      type:'bar', data:{labels:days, datasets},
+      options:{...chartOpts,scales:{x:{stacked:true,ticks:{color:'#8b949e'}},y:{stacked:true,ticks:{color:'#8b949e'}}}}
+    });
+  }
+}
+
+// System tab
+async function loadProcesses() {
+  try {
+    const r = await fetch(API + '/api/processes');
+    const d = await r.json();
+    const tbody = document.getElementById('proc-tbody');
+    tbody.innerHTML = d.processes.map(p => {
+      const srcClass = (p.source_type||'CLI').toLowerCase().replace(' ','');
+      return '<tr>'
+        + '<td>'+p.pid+'</td><td><a style="color:var(--purple);cursor:pointer;text-decoration:none" onclick="loadProcessDetail('+p.pid+')">'+esc(p.name)+'</a></td>'
+        + '<td><span class="badge '+srcClass+'">'+(p.source_type||'CLI')+'</span></td>'
+        + '<td>'+p.cpu_percent+'%</td><td>'+p.memory_percent+'%</td>'
+        + '<td>'+esc(p.uptime)+'</td>'
+        + '<td><span class="badge running">'+esc(p.status)+'</span></td>'
+        + '<td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(p.cmdline)+'">'+esc(p.cmdline)+'</td></tr>';
+    }).join('') || '<tr><td colspan="8" style="text-align:center;color:var(--text2)">No AI processes detected</td></tr>';
+  } catch(e) {}
+}
+
+async function loadConnections() {
+  try {
+    const r = await fetch(API + '/api/connections');
+    const d = await r.json();
+    const tbody = document.getElementById('conn-tbody');
+    tbody.innerHTML = d.connections.slice(0,50).map(c =>
+      '<tr><td>'+fmtTime(c.timestamp)+'</td><td>'+esc(c.process_name)+'</td>'
+      + '<td>'+esc(c.remote_host)+'</td><td>'+c.remote_port+'</td>'
+      + '<td>'+esc(c.service)+'</td></tr>'
+    ).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--text2)">No connections recorded</td></tr>';
+  } catch(e) {}
+}
+
+async function loadFiles() {
+  try {
+    const r = await fetch(API + '/api/files?limit=50');
+    const d = await r.json();
+    const tbody = document.getElementById('file-tbody');
+    tbody.innerHTML = d.files.map(f =>
+      '<tr><td>'+fmtTime(f.timestamp)+'</td><td>'+esc(f.operation)+'</td>'
+      + '<td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(f.path)+'">'+esc(f.path)+'</td>'
+      + '<td>'+fmtNum(f.size||0)+'</td></tr>'
+    ).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--text2)">No file activity recorded</td></tr>';
+  } catch(e) {}
+}
+
+// Alerts panel
+let alertOffset = 0;
+let alertPatternFilter = '';
+async function loadAlerts(customOffset) {
+  try {
+    if (customOffset !== undefined) alertOffset = customOffset;
+    else alertOffset = 0;
+    const sevFilter = document.getElementById('alert-severity-filter').value;
+    const catFilter = document.getElementById('alert-category-filter').value;
+    let url = API + '/api/alerts?limit=200&offset=' + alertOffset;
+    if (sevFilter) url += '&severity=' + sevFilter;
+    if (catFilter) url += '&category=' + catFilter;
+    const r = await fetch(url);
+    const d = await r.json();
+    const container = document.getElementById('alerts-list');
+    const total = d.total || 0;
+    document.getElementById('alerts-count').textContent = '(' + (alertOffset + d.alerts.length) + ' of ' + total + ')';
+
+    // Severity summary bar
+    const sc = d.severity_counts || {};
+    const sevBar = document.getElementById('alerts-severity-bar');
+    const sevColors = {critical:'#f85149',high:'#d29922',medium:'#58a6ff',low:'#8b949e'};
+    sevBar.innerHTML = '<div style="display:flex;gap:8px;flex-wrap:wrap">'
+      + Object.entries(sc).map(([s,n]) =>
+        '<span class="badge" style="background:' + (sevColors[s]||'#8b949e') + '22;color:' + (sevColors[s]||'#8b949e')
+        + ';cursor:pointer;border:1px solid ' + (sevColors[s]||'#8b949e') + '44" onclick="document.getElementById(\'alert-severity-filter\').value=\'' + s + '\';loadAlerts()">'
+        + s.toUpperCase() + ': ' + n + '</span>'
+      ).join('')
+      + '</div>';
+
+    if (!d.alerts.length) {
+      if (alertOffset === 0) container.innerHTML = '<div class="empty">No alerts match the current filters</div>';
+      return;
+    }
+
+    // Pattern type breakdown with clickable chips
+    const patternCounts = {};
+    d.alerts.forEach(a => (a.patterns||[]).forEach(p => { patternCounts[p] = (patternCounts[p]||0) + 1; }));
+    let summaryHtml = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">';
+    if (alertPatternFilter) {
+      summaryHtml += '<span class="badge" style="background:var(--red);color:white;cursor:pointer;border:1px solid var(--red)" onclick="filterAlertsByPattern(\'\')">&#x2715; Clear filter: ' + esc(alertPatternFilter) + '</span>';
+    }
+    for (const [p, cnt] of Object.entries(patternCounts).sort((a,b) => b[1]-a[1]).slice(0,15)) {
+      const isActive = alertPatternFilter === p;
+      summaryHtml += '<span class="badge" style="background:'+(isActive?'var(--blue)':'var(--surface2)')+';color:'+(isActive?'white':'var(--text2)')+';border:1px solid var(--border);cursor:pointer" onclick="filterAlertsByPattern(\''+esc(p)+'\')">' + esc(p) + ': ' + cnt + '</span>';
+    }
+    summaryHtml += '</div>';
+
+    let filtered = d.alerts;
+    if (alertPatternFilter) {
+      filtered = filtered.filter(a => (a.patterns||[]).includes(alertPatternFilter));
+    }
+
+    const sevBorders = {critical:'var(--red)',high:'var(--orange)',medium:'var(--blue)',low:'var(--text2)'};
+    const alertsHtml = filtered.map(a => {
+      const ago = fmtRelative(a.timestamp);
+      const patternChips = (a.patterns||[]).map(p =>
+        '<span class="badge" style="cursor:pointer;background:var(--surface2);color:var(--text2);border:1px solid var(--border);margin-right:4px" onclick="event.stopPropagation();filterAlertsByPattern(\''+esc(p)+'\')">' + esc(p) + '</span>'
+      ).join('');
+      const sev = a.severity || 'medium';
+      const borderColor = sevBorders[sev] || 'var(--red)';
+      const turnLabel = a.turn_number > 0 ? ' &rarr; Turn ' + a.turn_number : '';
+      return '<div class="alert-item" style="border-left-color:'+borderColor+'">'
+        + '<div class="alert-header">'
+        + '<span class="alert-patterns"><span class="badge" style="background:' + (sevColors[sev]||'#8b949e') + '22;color:'+(sevColors[sev]||'#8b949e')+';margin-right:6px">'
+        + sev.toUpperCase() + '</span>' + patternChips + '</span>'
+        + '<span class="alert-meta">' + ago + ' &middot; ' + fmtTime(a.timestamp) + '</span>'
+        + '</div>'
+        + '<div class="alert-context">Context: ' + esc(a.context)
+        + (a.categories ? ' &middot; ' + (a.categories||[]).join(', ') : '') + '</div>'
+        + (a.session_id ? '<div class="alert-session" onclick="openDeepDive(\''+a.session_id+'\', '+(a.turn_number||1)+')">' + esc(a.session_title) + turnLabel + '</div>' : '')
+        + '<div class="alert-snippet">' + esc(a.snippet) + '</div>'
+        + '</div>';
+    }).join('');
+
+    if (alertOffset === 0) {
+      container.innerHTML = summaryHtml + alertsHtml;
+    } else {
+      // Append to existing (remove old Load More button first)
+      const oldBtn = container.querySelector('.load-more-btn');
+      if (oldBtn) oldBtn.remove();
+      container.innerHTML += alertsHtml;
+    }
+
+    // Load More button
+    if (d.has_more) {
+      container.innerHTML += '<div class="load-more-btn" style="text-align:center;padding:12px">'
+        + '<button onclick="loadAlerts('+(alertOffset+200)+')" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:8px 24px;color:var(--text);font-size:13px;cursor:pointer">Load More</button></div>';
+    }
+  } catch(e) {}
+}
+function filterAlertsByPattern(p) {
+  alertPatternFilter = p;
+  loadAlerts();
+}
+
+// Export
+function exportData(type, format) {
+  document.getElementById('export-dropdown').style.display = 'none';
+  window.open(API + '/api/export?type=' + type + '&format=' + format, '_blank');
+}
+// Close dropdown on click outside
+document.addEventListener('click', e => {
+  const dd = document.getElementById('export-dropdown');
+  if (dd && !e.target.closest('.export-menu')) dd.style.display = 'none';
+});
+
+// Search handler
+let searchTimeout;
+document.getElementById('session-search').addEventListener('input', () => {
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(loadSessions, 300);
+});
+
+// Initial load & intervals
+loadStats(); loadSessions();
+statsInterval = setInterval(loadStats, 5000);
+sessionsInterval = setInterval(loadSessions, 5000);
+feedInterval = setInterval(pollFeed, 2000);
+
+// Load system tab data periodically
+setInterval(() => {
+  const sysTab = document.getElementById('panel-system');
+  if (sysTab.classList.contains('active')) {
+    loadProcesses(); loadConnections(); loadFiles();
+  }
+}, 3000);
+
+// ─── Browser Session Detail ───
+async function loadBrowserSessionDetail(conversationId) {
+  var convId = conversationId.replace(/^browser_/, '');
+  document.querySelectorAll('.session-item').forEach(function(el) { el.classList.remove('active'); });
+  var item = document.querySelector('.session-item[data-id="browser_'+convId+'"]');
+  if (item) item.classList.add('active');
+
+  var container = document.getElementById('session-detail');
+  container.innerHTML = '<div class="empty">Loading...</div>';
+
+  try {
+    var r = await fetch(API + '/api/browser/session/' + encodeURIComponent(convId));
+    var d = await r.json();
+    if (d.error) { container.innerHTML = '<div class="empty">' + esc(d.error) + '</div>'; return; }
+
+    var html = '<div class="header-bar"><div>'
+      + '<strong style="color:var(--purple)">' + esc(d.service) + '</strong>'
+      + '<span style="margin-left:8px">' + esc(d.title) + '</span>'
+      + '<div style="font-size:12px;color:var(--text2);margin-top:4px">'
+      + d.visit_count + ' visits' + (d.total_duration > 0 ? ' &middot; ' + fmtDuration(d.total_duration) : '')
+      + ' &middot; ' + fmtDate(d.first_visit) + ' - ' + fmtDate(d.last_visit)
+      + '</div></div></div>';
+
+    html += '<h4 style="margin:16px 0 8px;font-size:13px;color:var(--text2)">Visit Timeline</h4>';
+    for (var v of d.visits) {
+      var dur = v.duration_seconds ? fmtDuration(v.duration_seconds) : '';
+      var barWidth = Math.min(300, Math.max(2, (v.duration_seconds || 0)));
+      html += '<div class="event-block" style="border-left:3px solid var(--purple)">'
+        + '<div class="event-header" style="background:#2d1f3d;color:var(--purple)" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+        + '<span>' + fmtTime(v.visit_time) + (dur ? ' &middot; ' + dur : '') + '</span>'
+        + '<span style="font-size:11px">' + esc((v.title||'').substring(0,60)) + '</span></div>'
+        + '<div class="event-body">'
+        + '<div style="height:6px;background:var(--surface2);border-radius:3px;margin-bottom:6px">'
+        + '<div style="height:100%;width:'+barWidth+'px;background:var(--purple);border-radius:3px"></div></div>'
+        + '<div style="font-size:11px;color:var(--text2);word-break:break-all">' + esc(v.url) + '</div>'
+        + '</div></div>';
+    }
+
+    if (d.correlated_connections && d.correlated_connections.length > 0) {
+      html += '<h4 style="margin:16px 0 8px;font-size:13px;color:var(--text2)">Correlated Network Connections (' + d.correlated_connections.length + ')</h4>';
+      html += '<table class="data-table" style="font-size:12px"><thead><tr>'
+        + '<th>Time</th><th>Process</th><th>Host</th><th>Port</th><th>Service</th></tr></thead><tbody>';
+      for (var c of d.correlated_connections) {
+        html += '<tr><td>' + fmtTime(c.timestamp) + '</td><td>' + esc(c.process_name)
+          + '</td><td>' + esc(c.remote_host) + '</td><td>' + c.remote_port
+          + '</td><td>' + esc(c.service) + '</td></tr>';
+      }
+      html += '</tbody></table>';
+    }
+
+    container.innerHTML = html;
+  } catch(e) {
+    container.innerHTML = '<div class="empty">Error loading browser session</div>';
+  }
+}
+
+// ─── Process Detail ───
+async function loadProcessDetail(pid) {
+  switchTab('explorer');
+  var container = document.getElementById('session-detail');
+  container.innerHTML = '<div class="empty">Loading process details...</div>';
+
+  try {
+    var r = await fetch(API + '/api/process/' + pid);
+    var d = await r.json();
+    if (d.error) { container.innerHTML = '<div class="empty">' + esc(d.error) + '</div>'; return; }
+
+    var pname = d.processes.length > 0 ? d.processes[0].name : 'PID ' + pid;
+    var html = '<div class="header-bar"><div>'
+      + '<strong style="color:var(--cyan)">Process: ' + esc(pname) + '</strong>'
+      + '<div style="font-size:12px;color:var(--text2);margin-top:4px">PID ' + pid + '</div>'
+      + '</div></div>';
+
+    html += '<h4 style="margin:16px 0 8px;font-size:13px;color:var(--text2)">Lifecycle</h4>';
+    for (var p of d.processes) {
+      var statusClass = p.status === 'running' ? 'running' : 'terminated';
+      html += '<div class="event-block" style="border-left:3px solid var(--cyan)">'
+        + '<div class="event-header" style="background:#1a2d2d;color:var(--cyan)">'
+        + '<span><span class="badge ' + statusClass + '">' + esc(p.status) + '</span>'
+        + ' Started: ' + fmtDate(p.start_time)
+        + (p.end_time ? ' &middot; Ended: ' + fmtDate(p.end_time) : ' &middot; Running') + '</span></div>'
+        + '<div class="event-body">'
+        + '<div>CPU: ' + (p.cpu_percent || 0) + '% &middot; Memory: ' + (p.memory_percent || 0) + '%</div>'
+        + '<div style="font-size:11px;color:var(--text2);margin-top:4px;word-break:break-all">' + esc(p.cmdline) + '</div>'
+        + '</div></div>';
+    }
+
+    if (d.connections.length > 0) {
+      html += '<h4 style="margin:16px 0 8px;font-size:13px;color:var(--text2)">Network Connections (' + d.connections.length + ')</h4>';
+      html += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">';
+      for (var svc in d.service_breakdown) {
+        html += '<span class="badge" style="background:var(--surface2);color:var(--cyan);border:1px solid var(--border)">'
+          + esc(svc) + ': ' + d.service_breakdown[svc] + '</span>';
+      }
+      html += '</div>';
+      html += '<table class="data-table" style="font-size:12px"><thead><tr>'
+        + '<th>Time</th><th>Host</th><th>Port</th><th>Service</th></tr></thead><tbody>';
+      for (var c of d.connections.slice(0, 50)) {
+        html += '<tr><td>' + fmtTime(c.timestamp) + '</td>'
+          + '<td>' + esc(c.remote_host) + '</td><td>' + c.remote_port
+          + '</td><td>' + esc(c.service) + '</td></tr>';
+      }
+      html += '</tbody></table>';
+    } else {
+      html += '<div class="empty" style="padding:24px">No network connections recorded for this PID</div>';
+    }
+
+    container.innerHTML = html;
+  } catch(e) {
+    container.innerHTML = '<div class="empty">Error loading process details</div>';
+  }
+}
+
+// ─── Activity Timeline ───
+async function loadTimeline() {
+  try {
+    var source = document.getElementById('timeline-source').value;
+    var url = API + '/api/activity/timeline?limit=200';
+    if (source) url += '&source=' + source;
+    var r = await fetch(url);
+    var d = await r.json();
+    var container = document.getElementById('timeline-container');
+    document.getElementById('timeline-count').textContent = d.count + ' events';
+
+    var sourceColors = {cli:'var(--blue)', browser:'var(--purple)', process:'var(--cyan)', network:'var(--orange)'};
+    var sourceIcons = {cli:'&#x1f4bb;', browser:'&#x1f310;', process:'&#x2699;&#xfe0f;', network:'&#x1f517;'};
+
+    container.innerHTML = d.timeline.map(function(ev) {
+      var color = sourceColors[ev.source] || 'var(--text2)';
+      var icon = sourceIcons[ev.source] || '&#x2022;';
+      return '<div class="feed-item ' + ev.event_type + '" style="cursor:pointer"'
+        + ' onclick="timelineClick(\'' + esc(ev.source) + '\',\'' + esc(ev.session_id || '') + '\')">'
+        + '<span class="time">' + fmtTime(ev.timestamp) + '</span>'
+        + '<span class="icon">' + icon + '</span>'
+        + '<span class="type" style="color:' + color + '">' + esc(ev.source.toUpperCase()) + '</span>'
+        + '<span class="detail">'
+        + '<span style="color:' + color + ';font-weight:600">' + esc(ev.title) + '</span> '
+        + esc(ev.summary || '')
+        + '</span></div>';
+    }).join('');
+  } catch(e) {}
+}
+
+function timelineClick(source, sessionId) {
+  if (!sessionId) return;
+  if (source === 'browser') {
+    document.getElementById('session-source').value = 'all';
+    switchTab('explorer');
+    loadSessions();
+    loadBrowserSessionDetail(sessionId);
+  } else if (source === 'cli') {
+    document.getElementById('session-source').value = 'all';
+    switchTab('explorer');
+    loadSessionDetail(sessionId);
+  }
+}
+
+// ─── Deep Dive Cockpit ───
+let ddTurns = [];
+let ddSession = null;
+let ddActiveTurn = 0;
+
+async function openDeepDive(sessionId, jumpToTurn) {
+  try {
+    const r = await fetch(API + '/api/session/' + sessionId + '/turns');
+    const d = await r.json();
+    if (d.error) { console.error(d.error); return; }
+    ddSession = d.session;
+    ddTurns = d.turns;
+
+    document.getElementById('dd-title').textContent = ddSession.title || ddSession.session_id.substring(0,8);
+    document.getElementById('dd-meta').textContent =
+      (ddSession.model||'') + ' \u00b7 ' + d.total_turns + ' turns \u00b7 ' + fmtNum(d.total_input + d.total_output) + ' tokens';
+
+    renderTurnRail();
+    document.getElementById('deepdive-overlay').classList.add('open');
+    selectTurn(jumpToTurn || 1);
+  } catch(e) { console.error('Deep dive error:', e); }
+}
+
+function closeDeepDive() {
+  document.getElementById('deepdive-overlay').classList.remove('open');
+}
+
+function renderTurnRail() {
+  const rail = document.getElementById('dd-turn-rail');
+  rail.innerHTML = ddTurns.map(function(t) {
+    const tools = t.tools_used.slice(0, 3).map(function(name) {
+      return '<span class="tool-chip">' + esc(name) + '</span>';
+    }).join('');
+    return '<div class="turn-rail-item' + (t.has_alert ? ' has-alert' : '') + '"'
+      + ' data-turn="' + t.turn_number + '" onclick="selectTurn(' + t.turn_number + ')">'
+      + '<div><span class="turn-num">T' + t.turn_number + '</span>'
+      + ' <span style="color:var(--text2);font-size:11px">' + fmtTime(t.timestamp) + '</span>'
+      + (t.has_alert ? ' <span style="color:var(--red)">&#x26a0;</span>' : '') + '</div>'
+      + '<div class="turn-preview">' + esc(t.prompt_preview) + '</div>'
+      + (tools ? '<div class="turn-tools">' + tools + '</div>' : '')
+      + '</div>';
+  }).join('');
+}
+
+function selectTurn(num) {
+  ddActiveTurn = num;
+  var turn = ddTurns.find(function(t) { return t.turn_number === num; });
+  if (!turn) return;
+
+  // Highlight active rail item
+  document.querySelectorAll('.turn-rail-item').forEach(function(el) { el.classList.remove('active'); });
+  var el = document.querySelector('.turn-rail-item[data-turn="' + num + '"]');
+  if (el) { el.classList.add('active'); el.scrollIntoView({block:'nearest'}); }
+
+  renderInspector(turn);
+  renderContextPanel(turn);
+}
+
+function renderInspector(turn) {
+  var panel = document.getElementById('dd-inspector');
+  var html = '<div class="turn-header">Turn ' + turn.turn_number
+    + ' <span style="color:var(--text2);font-weight:normal;font-size:12px">' + fmtTime(turn.timestamp)
+    + ' &middot; &#x2191;' + fmtNum(turn.token_delta.input) + ' in &#x2193;' + fmtNum(turn.token_delta.output) + ' out</span></div>';
+
+  turn.events.forEach(function(ev) {
+    var data = ev.data || {};
+    switch(ev.event_type) {
+      case 'user_prompt':
+        html += '<div class="event-block user">'
+          + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+          + '<span>&#x1f464; USER (' + fmtTime(ev.timestamp) + ')</span></div>'
+          + '<div class="event-body"><pre>' + esc(data.text) + '</pre></div></div>';
+        break;
+      case 'thinking':
+        html += '<div class="event-block thinking collapsed">'
+          + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+          + '<span>&#x1f9e0; THINKING (' + (data.length||0) + ' chars)</span>'
+          + '<span style="font-size:11px">click to expand</span></div>'
+          + '<div class="event-body"><pre>' + esc(data.text) + '</pre></div></div>';
+        break;
+      case 'assistant_response':
+        html += '<div class="event-block assistant">'
+          + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+          + '<span>&#x1f916; CLAUDE (' + fmtTime(ev.timestamp) + ')</span></div>'
+          + '<div class="event-body"><pre>' + esc(data.text) + '</pre></div></div>';
+        break;
+      case 'tool_use':
+        var inputStr = typeof data.input === 'object' ? JSON.stringify(data.input, null, 2) : String(data.input||'');
+        html += '<div class="event-block tool_use collapsed">'
+          + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+          + '<span>&#x1f527; TOOL: ' + esc(data.name) + '</span>'
+          + '<span style="font-size:11px;color:var(--text2)">' + esc((data.input_preview||'').substring(0,60)) + '</span></div>'
+          + '<div class="event-body"><pre>' + esc(inputStr) + '</pre></div></div>';
+        break;
+      case 'tool_result':
+        html += '<div class="event-block tool_result collapsed">'
+          + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+          + '<span>&#x1f4c4; RESULT (' + (data.length||0) + ' chars)' + (data.is_error ? ' &#x274c; ERROR' : '') + '</span>'
+          + '<span style="font-size:11px">click to expand</span></div>'
+          + '<div class="event-body"><pre>' + esc(data.content) + '</pre></div></div>';
+        break;
+      case 'token_usage':
+        html += '<div class="event-block token_usage collapsed">'
+          + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+          + '<span>&#x1f4ca; Tokens: &#x2191;' + fmtNum(data.input_tokens||0) + ' in &#x2193;' + fmtNum(data.output_tokens||0) + ' out</span></div>'
+          + '<div class="event-body"><pre>Model: ' + esc(data.model) + '\nInput: ' + (data.input_tokens||0)
+          + '\nOutput: ' + (data.output_tokens||0) + '\nStop: ' + esc(data.stop_reason||'') + '</pre></div></div>';
+        break;
+      case 'sensitive_data':
+        html += '<div class="event-block sensitive">'
+          + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
+          + '<span>&#x26a0;&#xfe0f; ALERT: ' + esc((data.patterns||[]).join(', ')) + '</span></div>'
+          + '<div class="event-body"><pre>Context: ' + esc(data.context)
+          + '\nPatterns: ' + esc((data.patterns||[]).join(', '))
+          + '\nSnippet: ' + esc(data.snippet) + '</pre></div></div>';
+        break;
+    }
+  });
+  panel.innerHTML = html;
+}
+
+function renderContextPanel(turn) {
+  var panel = document.getElementById('dd-context');
+  var cum = turn.cumulative_tokens;
+  var total = cum.input + cum.output;
+  var maxCtx = 200000;
+  var pct = Math.min(100, (total / maxCtx) * 100);
+
+  var html = '<h4>Context Window</h4>'
+    + '<div class="context-gauge"><div class="context-gauge-fill" style="width:'
+    + pct + '%;background:' + (pct > 80 ? 'var(--red)' : pct > 60 ? 'var(--orange)' : 'var(--green)')
+    + '"></div></div>'
+    + '<div style="font-size:12px;color:var(--text2)">' + fmtNum(total) + ' / ' + fmtNum(maxCtx) + ' (' + pct.toFixed(1) + '%)</div>';
+
+  html += '<h4>Turn Tokens</h4>'
+    + '<div style="font-size:13px">&#x2191; ' + fmtNum(turn.token_delta.input) + ' in &middot; &#x2193; ' + fmtNum(turn.token_delta.output) + ' out</div>';
+
+  html += '<h4>Cumulative</h4>'
+    + '<div style="font-size:13px">&#x2191; ' + fmtNum(cum.input) + ' in &middot; &#x2193; ' + fmtNum(cum.output) + ' out</div>';
+
+  if (turn.tools_used.length) {
+    html += '<h4>Tools Used</h4>'
+      + turn.tools_used.map(function(t) { return '<span class="badge" style="background:var(--surface2);color:var(--orange);margin:2px">' + esc(t) + '</span>'; }).join('');
+  }
+
+  if (turn.has_alert) {
+    var alerts = turn.events.filter(function(e) { return e.event_type === 'sensitive_data'; });
+    html += '<h4 style="color:var(--red)">Alerts (' + alerts.length + ')</h4>';
+    alerts.forEach(function(a) {
+      html += '<div style="background:#3d1a1a;border-radius:4px;padding:6px;margin-bottom:4px;font-size:12px">'
+        + '<div style="color:var(--red);font-weight:600">' + esc((a.data.patterns||[]).join(', ')) + '</div>'
+        + '<div style="color:var(--text2)">' + esc(a.data.context || '') + '</div></div>';
+    });
+  }
+
+  panel.innerHTML = html;
+}
+
+// Keyboard navigation for Deep Dive
+document.addEventListener('keydown', function(e) {
+  if (!document.getElementById('deepdive-overlay').classList.contains('open')) return;
+  if (e.key === 'Escape') { closeDeepDive(); return; }
+  if (e.key === 'ArrowDown' || e.key === 'j') {
+    e.preventDefault();
+    if (ddActiveTurn < ddTurns.length) selectTurn(ddActiveTurn + 1);
+  }
+  if (e.key === 'ArrowUp' || e.key === 'k') {
+    e.preventDefault();
+    if (ddActiveTurn > 1) selectTurn(ddActiveTurn - 1);
+  }
+  if (e.key === 'e' || e.key === 'E') {
+    document.querySelectorAll('#dd-inspector .event-block').forEach(function(b) { b.classList.remove('collapsed'); });
+  }
+});
+</script>
+</body>
+</html>

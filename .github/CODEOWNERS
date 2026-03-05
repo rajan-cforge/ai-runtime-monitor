@@ -1,0 +1,12 @@
+# Default owners for everything
+* @rajan-cforge
+
+# Core monitoring engine
+src/claude_monitoring/monitor.py @rajan-cforge
+src/claude_monitoring/watch.py @rajan-cforge
+
+# Dashboard UI
+src/claude_monitoring/dashboard.html @rajan-cforge
+
+# CI/CD
+.github/workflows/ @rajan-cforge
