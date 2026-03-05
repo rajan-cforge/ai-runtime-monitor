@@ -44,7 +44,7 @@ def _write_csv(path, rows):
     return path
 
 
-def _sample_row(overrides: dict | None = None) -> dict:
+def _sample_row(overrides=None):
     """Return a single sample row dict with realistic values."""
     row = {
         "timestamp": "2026-01-01T00:01:00+00:00",
