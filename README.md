@@ -11,7 +11,7 @@ CrowdStrike-style runtime monitor for AI coding agents. Full visibility into wha
 
 ```bash
 pip3 install ai-runtime-monitor
-ai-monitor --start
+python3 -m claude_monitoring.monitor --start
 # Open http://localhost:9081
 ```
 

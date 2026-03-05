@@ -20,14 +20,13 @@ check-python:
 install: check-python ## Install ai-runtime-monitor (one-click setup)
 	$(PIP) install -e .
 	@echo ""
-	@echo "  ✓ Installed. Run 'make start' to launch the dashboard."
+	@echo "  Done. Run 'make start' to launch the dashboard."
 
 dev: check-python ## Install with dev dependencies (linting, testing)
 	$(PIP) install -e ".[dev]"
 
-start: ## Start the monitor + dashboard
-	@command -v ai-monitor >/dev/null 2>&1 || { echo "Error: ai-monitor not found. Run 'make install' first."; exit 1; }
-	ai-monitor --start
+start: ## Start the monitor + dashboard on http://localhost:9081
+	$(PYTHON) -m claude_monitoring.monitor --start
 
 stop: ## Stop the monitor
 	@lsof -ti :9081 2>/dev/null | xargs kill -9 2>/dev/null && echo "Stopped." || echo "Not running."
