@@ -4,7 +4,7 @@
 
 **Please do not open a public issue for security vulnerabilities.**
 
-Email: **rajan@cforge.com**
+Email: **rajan.conch@gmail.com**
 
 Include:
 - Description of the vulnerability
