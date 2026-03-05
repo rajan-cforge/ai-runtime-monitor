@@ -20,7 +20,22 @@ check-python:
 install: check-python ## Install ai-runtime-monitor (one-click setup)
 	$(PIP) install -e .
 	@echo ""
-	@echo "  Done. Run 'make start' to launch the dashboard."
+	@# Check if ai-monitor is on PATH
+	@if command -v ai-monitor >/dev/null 2>&1; then \
+		echo "  \033[32m✓\033[0m ai-monitor is on PATH"; \
+	else \
+		echo "  \033[33m⚠\033[0m ai-monitor not on PATH."; \
+		for d in $$HOME/.local/bin $$HOME/Library/Python/3.12/bin $$HOME/Library/Python/3.11/bin $$HOME/Library/Python/3.10/bin $$HOME/Library/Python/3.9/bin; do \
+			if [ -f "$$d/ai-monitor" ]; then \
+				echo "  Scripts installed to: $$d"; \
+				echo "  Add to your shell profile:"; \
+				echo "    export PATH=\"$$d:\$$PATH\""; \
+				break; \
+			fi; \
+		done; \
+	fi
+	@echo ""
+	@echo "  Done. Run 'make start' or 'ai-monitor --start' to launch."
 
 dev: check-python ## Install with dev dependencies (linting, testing)
 	$(PIP) install -e ".[dev]"
