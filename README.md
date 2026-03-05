@@ -10,7 +10,7 @@ CrowdStrike-style runtime monitor for AI coding agents. Full visibility into wha
 ## Install
 
 ```bash
-pip install ai-runtime-monitor
+pip3 install ai-runtime-monitor
 ai-monitor --start
 # Open http://localhost:9081
 ```
@@ -20,11 +20,11 @@ ai-monitor --start
 ```bash
 git clone https://github.com/rajan-cforge/ai-runtime-monitor.git
 cd ai-runtime-monitor
-make install   # pip install -e .
-make start     # ai-monitor --start
+make install   # auto-detects pip3/pip
+make start     # launches dashboard on http://localhost:9081
 ```
 
-That's it. Dashboard opens at `http://localhost:9081`.
+> **Troubleshooting:** If `pip` / `pip3` is not found, install Python 3.9+ from [python.org](https://www.python.org/downloads/) or run `python3 -m ensurepip --upgrade`.
 
 ## What It Does
 
