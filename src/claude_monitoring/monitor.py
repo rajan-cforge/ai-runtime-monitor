@@ -22,7 +22,6 @@ DEPENDENCIES:
 import argparse
 import json
 import os
-import re
 import shutil
 import signal
 import sqlite3
@@ -49,223 +48,28 @@ except ImportError:
     Observer = None
     FileSystemEventHandler = object
 
+from claude_monitoring.config import get_bind_address, get_dashboard_port, get_db_path, get_output_dir
+from claude_monitoring.constants import (
+    AI_HOSTS,
+    ANTHROPIC_IP_PREFIXES,
+    BROWSER_AI_PATTERNS,
+    PLAN_LIMITS,
+    SERVICE_CLASSIFICATION,
+    SEVERITY_ORDER,
+)
+from claude_monitoring.db import get_thread_db, init_db
+from claude_monitoring.utils import estimate_cost, is_ai_process, now_iso, scan_sensitive
 
 # ─────────────────────────────────────────────────────────────
 # SECTION 1: CONFIG & CONSTANTS
 # ─────────────────────────────────────────────────────────────
 
-DASHBOARD_PORT = 9081
+# Module-level path aliases (for backward compat with tests that patch these)
+DASHBOARD_PORT = get_dashboard_port()
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
-OUTPUT_DIR = Path.home() / "claude_watch_output"
-DB_PATH = OUTPUT_DIR / "monitor.db"
+OUTPUT_DIR = get_output_dir()
+DB_PATH = get_db_path()
 SCRIPT_PATH = Path(__file__).resolve()
-
-# Two-tier process matching to reduce false positives
-AI_PROCESS_EXACT = {
-    "claude",
-    "Claude",
-    "ChatGPT",
-    "ChatGPTHelper",
-    "Ollama",
-    "ollama",
-    "Cursor",
-    "Windsurf",
-}
-
-AI_PROCESS_PATTERNS = {
-    "claude": {"exclude": []},
-    "anthropic": {"exclude": []},
-    "chatgpt": {"exclude": []},
-    "ollama": {"exclude": []},
-    "copilot": {"exclude": ["CursorUIViewService"]},
-    "cursor": {"exclude": ["CursorUIViewService"]},
-    "aider": {"exclude": []},
-    "openai": {"exclude": []},
-    "lmstudio": {"exclude": []},
-    "cody": {"exclude": []},
-    "gemini": {"exclude": []},
-    "bedrock": {"exclude": []},
-    "codex": {"exclude": []},
-    "windsurf": {"exclude": []},
-}
-
-BROWSER_AI_PATTERNS = {
-    "chatgpt.com": "ChatGPT",
-    "chat.openai.com": "ChatGPT",
-    "gemini.google.com": "Gemini",
-    "claude.ai": "Claude Web",
-    "perplexity.ai": "Perplexity",
-    "copilot.microsoft.com": "Copilot",
-    "aistudio.google.com": "AI Studio",
-    "deepseek.com": "DeepSeek",
-}
-
-SERVICE_CLASSIFICATION = {
-    ".1e100.net": "Google APIs",
-    ".googleapis.com": "Google APIs",
-    ".anthropic.com": "Anthropic",
-    ".openai.com": "OpenAI",
-    ".azure.com": "Azure",
-    ".amazonaws.com": "AWS",
-    ".github.com": "GitHub",
-    ".sentry.io": "Sentry",
-    ".segment.io": "Segment",
-    ".statsig.com": "Statsig",
-    ".googleusercontent.com": "Anthropic API",
-    ".bc.googleusercontent.com": "Anthropic API",
-}
-
-# Known Anthropic API IP prefixes (GCP-hosted)
-ANTHROPIC_IP_PREFIXES = (
-    "160.79.",
-    "137.66.",
-    "35.185.",
-    "34.8.",
-    "34.49.",
-)
-
-AI_HOSTS = {
-    "api.anthropic.com": "anthropic_api",
-    "statsig.anthropic.com": "anthropic_telemetry",
-    "console.anthropic.com": "anthropic_console",
-    "api.openai.com": "openai_api",
-    "chatgpt.com": "chatgpt_web",
-    "copilot.githubusercontent.com": "github_copilot",
-    "api.githubcopilot.com": "github_copilot",
-    "generativelanguage.googleapis.com": "gemini_api",
-    "aiplatform.googleapis.com": "vertex_ai",
-    "bedrock.amazonaws.com": "aws_bedrock",
-    "api.mistral.ai": "mistral_api",
-    "api.cohere.ai": "cohere_api",
-    "api.groq.com": "groq_api",
-    "api.together.xyz": "together_api",
-    "api.perplexity.ai": "perplexity_api",
-    "api.deepseek.com": "deepseek_api",
-    "api.x.ai": "xai_grok_api",
-    "api.replicate.com": "replicate_api",
-    "api.fireworks.ai": "fireworks_api",
-    "openrouter.ai": "openrouter_api",
-    "sentry.io": "error_reporting",
-    "ingest.sentry.io": "error_reporting",
-    "api.statsig.com": "statsig_telemetry",
-}
-
-# Sensitive patterns with severity levels: critical, high, medium, low
-SENSITIVE_PATTERNS = {
-    # CRITICAL — immediate credential exposure
-    "aws_key": {"pattern": r"(?:AKIA|ASIA|AROA|AIDA)[A-Z0-9]{16}", "severity": "critical", "category": "credential"},
-    "aws_secret": {
-        "pattern": r"(?i)aws.{0,20}secret.{0,20}['\"][A-Za-z0-9/+=]{40}['\"]",
-        "severity": "critical",
-        "category": "credential",
-    },
-    "private_key": {
-        "pattern": r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----",
-        "severity": "critical",
-        "category": "credential",
-    },
-    "anthropic_key": {"pattern": r"sk-ant-[A-Za-z0-9\-_]{40,}", "severity": "critical", "category": "credential"},
-    "openai_key": {"pattern": r"sk-[A-Za-z0-9]{32,}", "severity": "critical", "category": "credential"},
-    "github_token": {"pattern": r"gh[pousr]_[A-Za-z0-9_]{36,}", "severity": "critical", "category": "credential"},
-    "slack_webhook": {
-        "pattern": r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+",
-        "severity": "critical",
-        "category": "credential",
-    },
-    "discord_webhook": {
-        "pattern": r"https://discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+",
-        "severity": "critical",
-        "category": "credential",
-    },
-    "stripe_key": {
-        "pattern": r"(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{20,}",
-        "severity": "critical",
-        "category": "credential",
-    },
-    # HIGH — secrets and tokens
-    "jwt_token": {
-        "pattern": r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+",
-        "severity": "high",
-        "category": "credential",
-    },
-    "bearer_token": {
-        "pattern": r"(?i)(?:Authorization|Bearer)\s*[:=]\s*['\"]?Bearer\s+[A-Za-z0-9_\-\.]{20,}",
-        "severity": "high",
-        "category": "credential",
-    },
-    "password_in_code": {
-        "pattern": r"(?i)(?:password|passwd|pwd)\s*[:=]\s*['\"][^'\"]{6,}['\"]",
-        "severity": "high",
-        "category": "credential",
-    },
-    "api_key_generic": {
-        "pattern": r"(?i)(?:api[_-]?key|apikey|api[_-]?secret)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{20,}",
-        "severity": "high",
-        "category": "credential",
-    },
-    "db_connection": {
-        "pattern": r"(?i)(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis|amqp)://[^\s'\"]{10,}",
-        "severity": "high",
-        "category": "credential",
-    },
-    "base64_secret": {
-        "pattern": r"(?i)(?:secret|token|key|auth)\s*[:=]\s*['\"]?[A-Za-z0-9+/]{40,}={0,2}['\"]?",
-        "severity": "high",
-        "category": "credential",
-    },
-    # MEDIUM — PII and sensitive data
-    "ssn": {"pattern": r"\b\d{3}-\d{2}-\d{4}\b", "severity": "medium", "category": "pii"},
-    "credit_card": {
-        "pattern": r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{3,4}\b",
-        "severity": "medium",
-        "category": "pii",
-    },
-    "phone_number": {
-        "pattern": r"\b(?:\+1[- ]?)?\(?\d{3}\)?[- ]?\d{3}[- ]?\d{4}\b",
-        "severity": "medium",
-        "category": "pii",
-    },
-    "email_bulk": {
-        "pattern": r"(?:[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\s*[,;\n]\s*){3,}",
-        "severity": "medium",
-        "category": "pii",
-    },
-    # LOW — informational / policy
-    "env_file": {"pattern": r"\.env(?:\.[a-z]+)?", "severity": "low", "category": "policy"},
-    "internal_url": {
-        "pattern": r"https?://(?:internal|staging|dev|local|corp|intranet)\.[a-z0-9.-]+",
-        "severity": "low",
-        "category": "policy",
-    },
-    "ip_address_private": {
-        "pattern": r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b",
-        "severity": "low",
-        "category": "policy",
-    },
-}
-
-# Severity ordering for display
-SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-
-MODEL_PRICING = {
-    "claude-opus-4": {"input": 15.00, "output": 75.00},
-    "claude-sonnet-4": {"input": 3.00, "output": 15.00},
-    "claude-haiku-4": {"input": 0.80, "output": 4.00},
-    "claude-3-5-sonnet": {"input": 3.00, "output": 15.00},
-    "claude-3-5-haiku": {"input": 0.80, "output": 4.00},
-    "claude-3-opus": {"input": 15.00, "output": 75.00},
-    "default": {"input": 3.00, "output": 15.00},
-}
-
-# Subscription plan token limits (approximate monthly input+output tokens)
-# Based on public Claude plan rate limits
-PLAN_LIMITS = {
-    "max_20x": {"monthly_tokens": 900_000_000, "label": "Max 20x"},
-    "max_5x": {"monthly_tokens": 225_000_000, "label": "Max 5x"},
-    "max": {"monthly_tokens": 45_000_000, "label": "Max"},
-    "pro": {"monthly_tokens": 45_000_000, "label": "Pro"},
-    "free": {"monthly_tokens": 5_000_000, "label": "Free"},
-}
 
 # In-memory live feed buffer
 live_feed = deque(maxlen=500)
@@ -280,186 +84,14 @@ plan_info = {"is_subscription": False, "plan_tier": "", "cost_label": "Total Cos
 
 
 # ─────────────────────────────────────────────────────────────
-# SECTION 2: SQLITE EVENT STORE
+# SECTION 2: UTILITY FUNCTIONS (module-level state)
 # ─────────────────────────────────────────────────────────────
-
-
-def init_db():
-    """Initialize SQLite database with all required tables."""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    c = conn.cursor()
-
-    c.execute("""CREATE TABLE IF NOT EXISTS events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT NOT NULL,
-        session_id TEXT,
-        event_type TEXT NOT NULL,
-        source_layer TEXT NOT NULL,
-        data_json TEXT NOT NULL
-    )""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS sessions (
-        session_id TEXT PRIMARY KEY,
-        start_time TEXT,
-        cwd TEXT,
-        model TEXT,
-        total_cost REAL DEFAULT 0,
-        total_input_tokens INTEGER DEFAULT 0,
-        total_output_tokens INTEGER DEFAULT 0,
-        total_turns INTEGER DEFAULT 0,
-        jsonl_path TEXT,
-        last_activity TEXT
-    )""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS processes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        pid INTEGER NOT NULL,
-        name TEXT,
-        cmdline TEXT,
-        start_time TEXT,
-        end_time TEXT,
-        cpu_percent REAL DEFAULT 0,
-        memory_percent REAL DEFAULT 0,
-        status TEXT DEFAULT 'running'
-    )""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS connections (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT NOT NULL,
-        pid INTEGER,
-        process_name TEXT,
-        remote_host TEXT,
-        remote_port INTEGER,
-        status TEXT,
-        service TEXT
-    )""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS file_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT NOT NULL,
-        path TEXT NOT NULL,
-        operation TEXT NOT NULL,
-        session_id TEXT,
-        size INTEGER DEFAULT 0
-    )""")
-
-    c.execute("""CREATE TABLE IF NOT EXISTS browser_sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        service TEXT NOT NULL,
-        url TEXT,
-        title TEXT,
-        conversation_id TEXT,
-        visit_time TEXT NOT NULL,
-        duration_seconds REAL DEFAULT 0,
-        foreground_seconds REAL DEFAULT 0,
-        tab_id INTEGER,
-        window_id INTEGER
-    )""")
-
-    # Add title column to sessions if missing
-    try:
-        c.execute("ALTER TABLE sessions ADD COLUMN title TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-
-    # Indexes
-    c.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(timestamp)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_sessions_last ON sessions(last_activity)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_file_events_ts ON file_events(timestamp)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_processes_pid ON processes(pid)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_browser_conv ON browser_sessions(conversation_id)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_browser_visit ON browser_sessions(visit_time)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_connections_pid ON connections(pid)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_connections_ts ON connections(timestamp)")
-
-    conn.commit()
-    return conn
-
-
-def get_thread_db():
-    """Get a thread-local database connection."""
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-# ─────────────────────────────────────────────────────────────
-# SECTION 3: UTILITY FUNCTIONS
-# ─────────────────────────────────────────────────────────────
-
-
-def scan_sensitive(text):
-    """Return list of dicts with pattern name, severity, category for matches found."""
-    found = []
-    if not text:
-        return found
-    # Limit scan size to prevent regex performance issues on huge texts
-    scan_text = text[:50000] if len(text) > 50000 else text
-    for name, info in SENSITIVE_PATTERNS.items():
-        pattern = info["pattern"]
-        try:
-            if re.search(pattern, scan_text):
-                found.append(
-                    {
-                        "name": name,
-                        "severity": info["severity"],
-                        "category": info["category"],
-                    }
-                )
-        except re.error:
-            continue
-    return found
-
-
-def estimate_cost(model, input_tokens, output_tokens, cache_read=0, cache_write=0):
-    """Estimate USD cost from token counts."""
-    pricing = MODEL_PRICING["default"]
-    for key in sorted(MODEL_PRICING.keys(), key=len, reverse=True):
-        if key != "default" and key in (model or ""):
-            pricing = MODEL_PRICING[key]
-            break
-    cost = (
-        input_tokens / 1_000_000 * pricing["input"]
-        + output_tokens / 1_000_000 * pricing["output"]
-        + cache_read / 1_000_000 * pricing["input"] * 0.1
-        + cache_write / 1_000_000 * pricing["input"] * 1.25
-    )
-    return round(cost, 6)
-
-
-def now_iso():
-    """Current UTC timestamp in ISO format."""
-    return datetime.now(timezone.utc).isoformat()
 
 
 def push_live_event(event):
     """Push event to the in-memory live feed."""
     with live_feed_lock:
         live_feed.append(event)
-
-
-def is_ai_process(name, cmdline, exe_path=""):
-    """Check if a process is an AI process using two-tier matching."""
-    if name in AI_PROCESS_EXACT:
-        return True
-    # Skip macOS system services
-    if exe_path and (exe_path.startswith("/System/Library/") or exe_path.startswith("/usr/libexec/")):
-        return False
-    name_lower = (name or "").lower()
-    cmdline_lower = (cmdline or "").lower()
-    for pattern, config in AI_PROCESS_PATTERNS.items():
-        if pattern in name_lower or pattern in cmdline_lower:
-            if any(excl in name for excl in config.get("exclude", [])):
-                continue
-            return True
-    return False
 
 
 def compute_forecast(db):
@@ -663,7 +295,7 @@ class JSONLSessionWatcher:
             if is_turn:
                 parts.append("total_turns=total_turns+1")
             vals.append(session_id)
-            self.db.execute(f"UPDATE sessions SET {', '.join(parts)} WHERE session_id=?", vals)
+            self.db.execute(f"UPDATE sessions SET {', '.join(parts)} WHERE session_id=?", vals)  # nosec B608
             self.db.commit()
         except Exception:
             pass
@@ -1440,7 +1072,9 @@ class ChromeHistoryWatcher:
             return []
 
         all_found = []
-        url_conditions = " OR ".join(f"urls.url LIKE '%{domain}%'" for domain in BROWSER_AI_PATTERNS)
+        # Parameterized LIKE conditions for browser AI pattern matching
+        url_placeholders = " OR ".join("urls.url LIKE ?" for _ in BROWSER_AI_PATTERNS)
+        url_params = [f"%{domain}%" for domain in BROWSER_AI_PATTERNS]
 
         for hist_path in history_files:
             profile_key = str(hist_path)
@@ -1460,16 +1094,12 @@ class ChromeHistoryWatcher:
                 else:
                     cutoff = last_check
 
-                query = f"""
-                    SELECT urls.url, urls.title, visits.visit_time, visits.visit_duration
-                    FROM visits
-                    JOIN urls ON visits.url = urls.id
-                    WHERE ({url_conditions})
-                      AND visits.visit_time > ?
-                    ORDER BY visits.visit_time ASC
-                """
+                query = f"""SELECT urls.url, urls.title, visits.visit_time, visits.visit_duration
+                    FROM visits JOIN urls ON visits.url = urls.id
+                    WHERE ({url_placeholders}) AND visits.visit_time > ?
+                    ORDER BY visits.visit_time ASC"""  # nosec B608
 
-                rows = conn.execute(query, (cutoff,)).fetchall()
+                rows = conn.execute(query, url_params + [cutoff]).fetchall()
 
                 for row in rows:
                     url = row["url"]
@@ -1582,6 +1212,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/activity/timeline": self._api_activity_timeline,
             "/api/process_detail": self._api_process_detail,
             "/api/export": self._api_export,
+            "/api/traffic": self._api_traffic,
+            "/api/traffic/stats": self._api_traffic_stats,
+            "/api/session_traffic": self._api_session_traffic,
         }
 
         # Match path prefixes for dynamic routes
@@ -1596,6 +1229,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if remainder.endswith("/turns"):
                 params["id"] = [remainder[: -len("/turns")]]
                 path = "/api/session_turns"
+            elif remainder.endswith("/traffic"):
+                params["id"] = [remainder[: -len("/traffic")]]
+                path = "/api/session_traffic"
             else:
                 params["id"] = [remainder]
                 path = "/api/session"
@@ -1644,23 +1280,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         order = sort_map.get(sort, "last_activity DESC")
 
         if q:
-            rows = db.execute(
-                f"""SELECT session_id, start_time, cwd, model, total_cost,
+            sql = f"""SELECT session_id, start_time, cwd, model, total_cost,
                           total_input_tokens, total_output_tokens, total_turns,
                           jsonl_path, last_activity, title
                    FROM sessions
                    WHERE title LIKE ? OR session_id LIKE ? OR cwd LIKE ? OR model LIKE ?
-                   ORDER BY {order} LIMIT ?""",
-                (f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", limit),
-            ).fetchall()
+                   ORDER BY {order} LIMIT ?"""  # nosec B608
+            rows = db.execute(sql, (f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", limit)).fetchall()
         else:
-            rows = db.execute(
-                f"""SELECT session_id, start_time, cwd, model, total_cost,
+            sql = f"""SELECT session_id, start_time, cwd, model, total_cost,
                           total_input_tokens, total_output_tokens, total_turns,
                           jsonl_path, last_activity, title
-                   FROM sessions ORDER BY {order} LIMIT ?""",
-                (limit,),
-            ).fetchall()
+                   FROM sessions ORDER BY {order} LIMIT ?"""  # nosec B608
+            rows = db.execute(sql, (limit,)).fetchall()
         sessions = [dict(r) for r in rows]
 
         # Add source field to CLI sessions
@@ -1671,12 +1303,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         session_ids = [s["session_id"] for s in sessions]
         if session_ids:
             placeholders = ",".join("?" * len(session_ids))
-            alert_rows = db.execute(
-                f"""SELECT session_id, COUNT(*) as cnt FROM events
+            alert_sql = f"""SELECT session_id, COUNT(*) as cnt FROM events
                     WHERE event_type='sensitive_data' AND session_id IN ({placeholders})
-                    GROUP BY session_id""",
-                session_ids,
-            ).fetchall()
+                    GROUP BY session_id"""  # nosec B608
+            alert_rows = db.execute(alert_sql, session_ids).fetchall()
             alert_map = {r["session_id"]: r["cnt"] for r in alert_rows}
             for s in sessions:
                 s["alert_count"] = alert_map.get(s["session_id"], 0)
@@ -2136,8 +1766,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         where = " AND ".join(conditions)
         bind_vals.append(limit)
 
-        rows = db.execute(
-            f"""SELECT conversation_id, service,
+        browser_sql = f"""SELECT conversation_id, service,
                        MIN(visit_time) as first_visit,
                        MAX(visit_time) as last_visit,
                        COUNT(*) as visit_count,
@@ -2151,9 +1780,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 WHERE {where}
                 GROUP BY conversation_id
                 ORDER BY last_visit DESC
-                LIMIT ?""",
-            bind_vals,
-        ).fetchall()
+                LIMIT ?"""  # nosec B608
+        rows = db.execute(browser_sql, bind_vals).fetchall()
 
         sessions = [dict(r) for r in rows]
 
@@ -2214,15 +1842,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if hosts and first_visit and last_visit:
             host_conditions = " OR ".join(["remote_host LIKE ?"] * len(hosts))
             host_binds = [f"%{h}%" for h in hosts]
-            conn_rows = db.execute(
-                f"""SELECT timestamp, pid, process_name, remote_host, remote_port, service
+            conn_sql = f"""SELECT timestamp, pid, process_name, remote_host, remote_port, service
                     FROM connections
                     WHERE ({host_conditions})
                       AND timestamp >= datetime(?, '-5 minutes')
                       AND timestamp <= datetime(?, '+5 minutes')
-                    ORDER BY timestamp ASC LIMIT 100""",
-                host_binds + [first_visit, last_visit],
-            ).fetchall()
+                    ORDER BY timestamp ASC LIMIT 100"""  # nosec B608
+            conn_rows = db.execute(conn_sql, host_binds + [first_visit, last_visit]).fetchall()
             correlated_connections = [dict(r) for r in conn_rows]
 
         self._send_json(
@@ -2299,15 +1925,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 cli_conds.append("e.timestamp > ?")
                 cli_binds.append(since)
             cli_binds.append(limit)
-            cli_rows = db.execute(
-                f"""SELECT e.timestamp, e.event_type, e.session_id, e.data_json,
+            cli_sql = f"""SELECT e.timestamp, e.event_type, e.session_id, e.data_json,
                            s.title, s.model
                     FROM events e
                     LEFT JOIN sessions s ON e.session_id = s.session_id
                     WHERE {" AND ".join(cli_conds)}
-                    ORDER BY e.timestamp DESC LIMIT ?""",
-                cli_binds,
-            ).fetchall()
+                    ORDER BY e.timestamp DESC LIMIT ?"""  # nosec B608
+            cli_rows = db.execute(cli_sql, cli_binds).fetchall()
             for r in cli_rows:
                 try:
                     data = json.loads(r["data_json"]) if r["data_json"] else {}
@@ -2333,13 +1957,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 browser_conds.append("visit_time > ?")
                 browser_binds.append(since)
             browser_binds.append(limit)
-            browser_rows = db.execute(
-                f"""SELECT visit_time, service, title, url, conversation_id, duration_seconds
+            b_sql = f"""SELECT visit_time, service, title, url, conversation_id, duration_seconds
                     FROM browser_sessions
                     WHERE {" AND ".join(browser_conds)}
-                    ORDER BY visit_time DESC LIMIT ?""",
-                browser_binds,
-            ).fetchall()
+                    ORDER BY visit_time DESC LIMIT ?"""  # nosec B608
+            browser_rows = db.execute(b_sql, browser_binds).fetchall()
             for r in browser_rows:
                 rd = dict(r)
                 dur = int(rd.get("duration_seconds") or 0)
@@ -2363,13 +1985,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 net_conds.append("timestamp > ?")
                 net_binds.append(since)
             net_binds.append(limit)
-            net_rows = db.execute(
-                f"""SELECT timestamp, pid, process_name, remote_host, remote_port, service
+            n_sql = f"""SELECT timestamp, pid, process_name, remote_host, remote_port, service
                     FROM connections
                     WHERE {" AND ".join(net_conds)}
-                    ORDER BY timestamp DESC LIMIT ?""",
-                net_binds,
-            ).fetchall()
+                    ORDER BY timestamp DESC LIMIT ?"""  # nosec B608
+            net_rows = db.execute(n_sql, net_binds).fetchall()
             for r in net_rows:
                 rd = dict(r)
                 timeline.append(
@@ -2454,13 +2074,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 bind_vals.extend(types)
             bind_vals.append(limit)
 
-            rows = db.execute(
-                f"""SELECT id, timestamp, session_id, event_type, source_layer, data_json
+            evt_sql = f"""SELECT id, timestamp, session_id, event_type, source_layer, data_json
                    FROM events
                    WHERE {" AND ".join(conditions)}
-                   ORDER BY id DESC LIMIT ?""",
-                bind_vals,
-            ).fetchall()
+                   ORDER BY id DESC LIMIT ?"""  # nosec B608
+            rows = db.execute(evt_sql, bind_vals).fetchall()
             data = []
             for r in rows:
                 row = dict(r)
@@ -2513,6 +2131,115 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 {"export_type": export_type, "count": len(data), "exported_at": now_iso(), "data": data},
                 fname + ".json",
             )
+
+    # ── API Traffic endpoints (claude-watch integration) ──────────────
+
+    def _api_traffic(self, params):
+        """Paginated list of API calls from claude-watch dual-write."""
+        db = get_thread_db()
+        limit = int(params.get("limit", ["50"])[0])
+        offset = int(params.get("offset", ["0"])[0])
+        service = params.get("service", [""])[0]
+        model = params.get("model", [""])[0]
+
+        conditions = ["1=1"]
+        bind_vals = []
+        if service:
+            conditions.append("destination_service = ?")
+            bind_vals.append(service)
+        if model:
+            conditions.append("model LIKE ?")
+            bind_vals.append(f"%{model}%")
+
+        where = " AND ".join(conditions)
+
+        count_sql = f"SELECT COUNT(*) FROM api_calls WHERE {where}"  # nosec B608
+        total = db.execute(count_sql, bind_vals).fetchone()[0]
+
+        query_sql = f"""SELECT * FROM api_calls WHERE {where}
+            ORDER BY timestamp DESC LIMIT ? OFFSET ?"""  # nosec B608
+        rows = db.execute(query_sql, bind_vals + [limit, offset]).fetchall()
+
+        self._send_json(
+            {
+                "calls": [dict(r) for r in rows],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+
+    def _api_traffic_stats(self, params):
+        """Aggregated traffic statistics."""
+        db = get_thread_db()
+        row = db.execute(
+            """SELECT COUNT(*) as total_calls,
+                      COALESCE(SUM(input_tokens), 0) as total_input_tokens,
+                      COALESCE(SUM(output_tokens), 0) as total_output_tokens,
+                      COALESCE(SUM(estimated_cost_usd), 0) as total_cost,
+                      COALESCE(AVG(latency_ms), 0) as avg_latency,
+                      COALESCE(SUM(sensitive_pattern_count), 0) as total_sensitive
+               FROM api_calls"""
+        ).fetchone()
+
+        by_service = db.execute(
+            """SELECT destination_service, COUNT(*) as count,
+                      COALESCE(SUM(estimated_cost_usd), 0) as cost
+               FROM api_calls GROUP BY destination_service
+               ORDER BY count DESC"""
+        ).fetchall()
+
+        by_model = db.execute(
+            """SELECT model, COUNT(*) as count,
+                      COALESCE(SUM(estimated_cost_usd), 0) as cost
+               FROM api_calls WHERE model != '' GROUP BY model
+               ORDER BY count DESC"""
+        ).fetchall()
+
+        self._send_json(
+            {
+                "total_calls": row["total_calls"],
+                "total_input_tokens": row["total_input_tokens"],
+                "total_output_tokens": row["total_output_tokens"],
+                "total_cost": round(row["total_cost"], 6),
+                "avg_latency": round(row["avg_latency"], 1),
+                "total_sensitive": row["total_sensitive"],
+                "by_service": [dict(r) for r in by_service],
+                "by_model": [dict(r) for r in by_model],
+            }
+        )
+
+    def _api_session_traffic(self, params):
+        """All API calls for a specific session."""
+        session_id = params.get("id", [""])[0]
+        if not session_id:
+            self._send_json({"error": "session id required"}, 400)
+            return
+
+        db = get_thread_db()
+        rows = db.execute(
+            """SELECT * FROM api_calls WHERE session_id = ?
+               ORDER BY turn_number ASC""",
+            (session_id,),
+        ).fetchall()
+
+        # Compute cumulative cost
+        calls = []
+        cumulative_cost = 0.0
+        for r in rows:
+            call = dict(r)
+            cumulative_cost += call.get("estimated_cost_usd", 0) or 0
+            call["cumulative_cost"] = round(cumulative_cost, 6)
+            calls.append(call)
+
+        self._send_json(
+            {
+                "session_id": session_id,
+                "calls": calls,
+                "total_calls": len(calls),
+                "total_cost": round(cumulative_cost, 6),
+            }
+        )
 
 
 def _format_uptime(create_time):
@@ -2664,7 +2391,7 @@ def start_monitoring():
     class ReusableHTTPServer(HTTPServer):
         allow_reuse_address = True
 
-    server = ReusableHTTPServer(("0.0.0.0", DASHBOARD_PORT), DashboardHandler)
+    server = ReusableHTTPServer((get_bind_address(), DASHBOARD_PORT), DashboardHandler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True, name="Dashboard")
     server_thread.start()
     print(f"\n  Dashboard: http://localhost:{DASHBOARD_PORT}")
@@ -2814,6 +2541,8 @@ def main():
     )
     parser.add_argument("--uninstall-agent", action="store_true", help="Remove macOS LaunchAgent")
     parser.add_argument("--port", type=int, default=DASHBOARD_PORT, help=f"Dashboard port (default: {DASHBOARD_PORT})")
+    parser.add_argument("--init-config", action="store_true", help="Generate default config.toml")
+    parser.add_argument("--with-proxy", action="store_true", help="Also start HTTPS proxy for deep API capture")
 
     args = parser.parse_args()
 
@@ -2821,13 +2550,30 @@ def main():
         # Update the module-level port if overridden
         _update_port(args.port)
 
-    if args.install_agent:
+    if args.init_config:
+        from claude_monitoring.config import generate_default_config
+
+        path = generate_default_config()
+        print(f"Config file generated at: {path}")
+        print("Edit this file to customize ports, paths, and proxy settings.")
+        sys.exit(0)
+    elif args.install_agent:
         install_launch_agent()
     elif args.uninstall_agent:
         uninstall_launch_agent()
     elif args.scan:
         one_shot_scan()
     elif args.start:
+        if args.with_proxy:
+            from claude_monitoring.config import get_proxy_port
+
+            subprocess.Popen(
+                [sys.executable, "-m", "claude_monitoring.watch", "--start"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            print(f"Proxy started on port {get_proxy_port()}")
+            print(f"To enable: export HTTPS_PROXY=http://127.0.0.1:{get_proxy_port()}")
         start_monitoring()
     else:
         parser.print_help()

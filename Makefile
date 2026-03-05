@@ -1,4 +1,4 @@
-.PHONY: install dev test lint format clean start stop status help
+.PHONY: install dev test lint format clean start start-deep stop status verify configure help
 
 # Auto-detect python/pip — prefer python3/pip3 (macOS), fall back to python/pip
 PYTHON := $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null)
@@ -28,6 +28,16 @@ dev: check-python ## Install with dev dependencies (linting, testing)
 start: ## Start the monitor + dashboard on http://localhost:9081
 	@lsof -ti :9081 2>/dev/null | xargs kill -9 2>/dev/null || true
 	$(PYTHON) -m claude_monitoring.monitor --start
+
+start-deep: ## Start monitor + HTTPS proxy for deep API capture
+	@lsof -ti :9081 2>/dev/null | xargs kill -9 2>/dev/null || true
+	$(PYTHON) -m claude_monitoring.monitor --start --with-proxy
+
+verify: ## Verify proxy setup
+	$(PYTHON) -m claude_monitoring.watch --verify
+
+configure: ## Configure proxy for Claude Code
+	$(PYTHON) -m claude_monitoring.watch --configure claude_code
 
 stop: ## Stop the monitor
 	@lsof -ti :9081 2>/dev/null | xargs kill -9 2>/dev/null && echo "Stopped." || echo "Not running."

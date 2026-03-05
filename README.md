@@ -56,26 +56,71 @@ make start     # launches dashboard on http://localhost:9081
 - **Alerts** — Sensitive data alerts with pattern filtering and session-level triage
 - **Activity Timeline** — Unified chronological feed across all AI sources
 
-## Advanced: Network Interception
+## Advanced: Deep API Capture
 
-For deep API-level traffic capture (every prompt, response, and tool call sent to AI APIs):
+For full API-level traffic interception (every prompt, response, token count, and tool call):
 
 ```bash
 pip install "ai-runtime-monitor[watch]"
-claude-watch --setup    # First-time: install deps & trust cert
-claude-watch --start    # Start mitmproxy-based interceptor
+
+# First-time setup
+claude-watch --setup            # Install mitmproxy, generate & trust cert
+claude-watch --verify           # Verify everything is ready
+
+# Option A: Start both together
+ai-monitor --start --with-proxy
+
+# Option B: Start separately
+ai-monitor --start              # Dashboard on :9081
+claude-watch --start            # Proxy on :9080
+
+# Route your AI agent through the proxy
+export HTTPS_PROXY=http://127.0.0.1:9080
+claude                          # API calls now appear in the API Traffic tab
+```
+
+**Per-agent proxy configuration:**
+
+```bash
+claude-watch --configure claude_code   # Adds HTTPS_PROXY to your shell profile
+claude-watch --configure list          # Show supported agents and status
+claude-watch --unconfigure             # Remove proxy config from shell
 ```
 
 ## Configuration
 
+Generate a config file:
+```bash
+ai-monitor --init-config    # Creates ~/.config/ai-runtime-monitor/config.toml
+```
+
+**ai-monitor flags:**
+
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--port` | 9081 | Dashboard HTTP port |
 | `--start` | — | Start monitoring + dashboard |
+| `--port` | 9081 | Dashboard HTTP port |
+| `--with-proxy` | — | Also start HTTPS proxy for deep capture |
 | `--scan` | — | One-shot process/network scan |
 | `--install-agent` | — | Install as macOS LaunchAgent (auto-start on login) |
+| `--init-config` | — | Generate default config.toml |
+
+**claude-watch flags:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--setup` | — | First-time: install mitmproxy, trust cert |
+| `--start` | — | Start proxy interceptor |
+| `--verify` | — | Health-check proxy setup |
+| `--configure <agent>` | — | Configure HTTPS_PROXY for an agent |
+| `--unconfigure` | — | Remove proxy config from shell profiles |
+| `--analyze` | — | Terminal analysis of latest session |
+| `--plot` | — | Generate PNG dashboard charts |
+| `--dashboard` | — | Launch standalone web dashboard |
 
 Output directory: `~/claude_watch_output/`
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full API reference, database schema, and security model.
 
 ## Development
 

@@ -1,6 +1,7 @@
 """Tests for estimate_cost() and MODEL_PRICING."""
 
-from claude_monitoring.monitor import MODEL_PRICING, estimate_cost
+from claude_monitoring.constants import MODEL_PRICING
+from claude_monitoring.utils import estimate_cost
 
 
 class TestEstimateCost:

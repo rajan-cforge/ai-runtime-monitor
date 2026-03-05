@@ -1,6 +1,6 @@
 """Tests for scan_sensitive() pattern detection."""
 
-from claude_monitoring.monitor import scan_sensitive
+from claude_monitoring.utils import scan_sensitive
 
 
 class TestScanSensitive:

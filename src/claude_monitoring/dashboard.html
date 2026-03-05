@@ -180,6 +180,30 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
 .context-gauge-fill { height:100%; border-radius:4px; transition:width 0.3s; }
 .timing-bar { display:flex; align-items:center; gap:6px; margin-bottom:4px; font-size:11px; }
 .timing-bar-fill { height:6px; border-radius:3px; }
+
+/* API Traffic */
+.traffic-summary { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:16px; }
+.traffic-card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px; }
+.traffic-card .tc-label { font-size:11px; color:var(--text2); text-transform:uppercase; letter-spacing:0.5px; display:flex; align-items:center; gap:6px; margin-bottom:4px; }
+.traffic-card .tc-value { font-size:22px; font-weight:700; }
+.traffic-banner { padding:10px 16px; border-radius:6px; font-size:13px; margin-bottom:16px; }
+.traffic-banner.active { background:#1a2e1a; border:1px solid #2a4a2a; color:var(--green); }
+.traffic-banner.inactive { background:var(--surface2); border:1px solid var(--border); color:var(--text2); }
+.traffic-table { width:100%; border-collapse:collapse; background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+.traffic-table th { background:var(--surface2); padding:10px 12px; text-align:left; font-size:12px; color:var(--text2); border-bottom:1px solid var(--border); cursor:pointer; user-select:none; }
+.traffic-table th:hover { color:var(--text); }
+.traffic-table th .sort-arrow { font-size:10px; margin-left:4px; }
+.traffic-table td { padding:8px 12px; border-bottom:1px solid var(--border); font-size:13px; }
+.traffic-table tr:hover td { background:var(--surface2); }
+.traffic-table tr.expandable { cursor:pointer; }
+.traffic-row-detail { display:none; }
+.traffic-row-detail.open { display:table-row; }
+.traffic-row-detail td { background:var(--surface2); padding:12px 16px; }
+.traffic-detail-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; font-size:12px; }
+.traffic-detail-grid .td-label { color:var(--text2); font-size:11px; text-transform:uppercase; margin-bottom:2px; }
+.traffic-detail-grid .td-value { color:var(--text); }
+.traffic-detail-grid .sensitive-flag { color:var(--red); font-weight:600; }
+.traffic-load-more { text-align:center; padding:16px; }
 </style>
 </head>
 <body>
@@ -221,6 +245,7 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
   <div class="tab" data-tab="feed">Live Feed</div>
   <div class="tab" data-tab="analytics">Analytics</div>
   <div class="tab" data-tab="system">System</div>
+  <div class="tab" data-tab="traffic">API Traffic</div>
   <div class="tab" data-tab="timeline">Activity Timeline</div>
   <div class="tab" data-tab="alerts">Alerts</div>
 </div>
@@ -299,6 +324,37 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
           <tbody id="file-tbody"></tbody>
         </table>
       </div>
+    </div>
+  </div>
+
+  <!-- API Traffic -->
+  <div class="panel" id="panel-traffic">
+    <div class="traffic-summary">
+      <div class="traffic-card"><div class="tc-label">&#x1f310; Total API Calls</div><div class="tc-value" id="traffic-total">-</div></div>
+      <div class="traffic-card"><div class="tc-label">&#x1f4b2; Total Cost</div><div class="tc-value" id="traffic-cost" style="color:var(--green)">-</div></div>
+      <div class="traffic-card"><div class="tc-label">&#x23f1; Avg Latency</div><div class="tc-value" id="traffic-latency">-</div></div>
+      <div class="traffic-card"><div class="tc-label">&#x26a0; Sensitive Calls</div><div class="tc-value" id="traffic-sensitive" style="color:var(--red)">-</div></div>
+    </div>
+    <div id="traffic-banner"></div>
+    <div style="overflow-x:auto">
+      <table class="traffic-table" id="traffic-table">
+        <thead>
+          <tr>
+            <th onclick="sortTraffic('timestamp')">Timestamp <span class="sort-arrow" id="sort-timestamp">&#x25BC;</span></th>
+            <th onclick="sortTraffic('service')">Service <span class="sort-arrow" id="sort-service"></span></th>
+            <th onclick="sortTraffic('model')">Model <span class="sort-arrow" id="sort-model"></span></th>
+            <th onclick="sortTraffic('input_tokens')">Input Tokens <span class="sort-arrow" id="sort-input_tokens"></span></th>
+            <th onclick="sortTraffic('output_tokens')">Output Tokens <span class="sort-arrow" id="sort-output_tokens"></span></th>
+            <th onclick="sortTraffic('cost')">Cost <span class="sort-arrow" id="sort-cost"></span></th>
+            <th onclick="sortTraffic('latency')">Latency <span class="sort-arrow" id="sort-latency"></span></th>
+            <th onclick="sortTraffic('status')">Status <span class="sort-arrow" id="sort-status"></span></th>
+          </tr>
+        </thead>
+        <tbody id="traffic-tbody"></tbody>
+      </table>
+    </div>
+    <div class="traffic-load-more" id="traffic-load-more" style="display:none">
+      <button onclick="loadTraffic(false)" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:8px 24px;color:var(--text);font-size:13px;cursor:pointer">Load More</button>
     </div>
   </div>
 
@@ -382,6 +438,7 @@ function switchTab(name) {
   if (tab) tab.classList.add('active');
   document.getElementById('panel-' + name).classList.add('active');
   if (name === 'system') { loadProcesses(); loadConnections(); loadFiles(); }
+  if (name === 'traffic') { loadTraffic(true); }
   if (name === 'timeline') { loadTimeline(); }
   if (name === 'alerts') { loadAlerts(); }
 }
@@ -415,6 +472,20 @@ function fmtRelative(ts) {
     if (diff < 172800) return 'yesterday';
     return Math.floor(diff/86400) + 'd ago';
   } catch(e) { return ts; }
+}
+function fmtTimestamp(ts) {
+  if (!ts) return '';
+  try {
+    const d = new Date(ts);
+    const month = d.toLocaleString('default', {month:'short'});
+    const day = d.getDate();
+    const time = d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+    return month + ' ' + day + ', ' + time;
+  } catch(e) { return ts; }
+}
+function fmtActivityTime(ts) {
+  if (!ts) return '';
+  return fmtTimestamp(ts) + ' (' + fmtRelative(ts) + ')';
 }
 function fmtDuration(secs) {
   if (!secs || secs <= 0) return '';
@@ -505,7 +576,6 @@ async function loadSessions() {
       const isBrowser = s.source === 'browser';
       const title = s.title || (isBrowser ? (s.service || 'Browser') : s.session_id.substring(0,8));
       const proj = isBrowser ? '' : projectName(s.cwd);
-      const ago = fmtRelative(s.last_activity);
       const itemClass = isBrowser ? 'session-item browser' : 'session-item';
       const clickFn = isBrowser
         ? "loadBrowserSessionDetail('" + (s.conversation_id || s.session_id) + "')"
@@ -520,10 +590,11 @@ async function loadSessions() {
         + '<span style="color:var(--text2)">' + (isBrowser ? (s.conversation_id||'').substring(0,12) : s.session_id.substring(0,8)) + '</span>'
         + (proj ? '<span class="project-badge">'+esc(proj)+'</span>' : '')
         + '</div>'
+        + '<div style="font-size:11px;color:var(--text2);margin-top:3px">Started: ' + fmtTimestamp(s.start_time) + '</div>'
+        + '<div style="font-size:11px;color:var(--text2);margin-top:1px">Latest: ' + fmtActivityTime(s.last_activity) + '</div>'
         + '<div class="stats-row">'
         + '<span>' + (isBrowser ? (s.total_turns||0) + ' visits' : s.total_turns + ' turns') + '</span>'
         + (isBrowser ? (s.total_duration > 0 ? '<span>' + fmtDuration(s.total_duration) + '</span>' : '') : '<span>' + fmtNum(s.total_input_tokens||0) + ' tokens</span>')
-        + '<span>' + ago + '</span>'
         + (!isBrowser && s.alert_count > 0 ? '<span style="color:var(--red);font-size:11px">&#x26a0; '+s.alert_count+'</span>' : '')
         + '</div></div>';
     }).join('');
@@ -557,13 +628,17 @@ async function loadSessionDetail(id) {
       + '<button onclick="openDeepDive(\'' + s.session_id + '\')" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:4px 10px;color:var(--blue);font-size:12px;cursor:pointer;font-weight:600">&#x1f52c; Deep Dive</button>'
       + '</div></div>';
 
-    let turnNum = 0;
-    for (const ev of d.events) {
+    // Reverse events: show most recent first
+    const reversedEvents = d.events.slice().reverse();
+    // Pre-count total user turns for correct numbering
+    const totalUserTurns = d.events.filter(e => e.event_type === 'user_prompt').length;
+    let turnNum = totalUserTurns + 1;
+    for (const ev of reversedEvents) {
       const data = ev.data;
       const time = fmtTime(ev.timestamp);
       switch(ev.event_type) {
         case 'user_prompt':
-          turnNum++;
+          turnNum--;
           html += '<div class="event-block user">'
             + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
             + '<span>&#x1f464; USER (Turn '+turnNum+', '+time+')</span></div>'
@@ -890,7 +965,6 @@ async function loadAlerts(customOffset) {
 
     const sevBorders = {critical:'var(--red)',high:'var(--orange)',medium:'var(--blue)',low:'var(--text2)'};
     const alertsHtml = filtered.map(a => {
-      const ago = fmtRelative(a.timestamp);
       const patternChips = (a.patterns||[]).map(p =>
         '<span class="badge" style="cursor:pointer;background:var(--surface2);color:var(--text2);border:1px solid var(--border);margin-right:4px" onclick="event.stopPropagation();filterAlertsByPattern(\''+esc(p)+'\')">' + esc(p) + '</span>'
       ).join('');
@@ -901,7 +975,7 @@ async function loadAlerts(customOffset) {
         + '<div class="alert-header">'
         + '<span class="alert-patterns"><span class="badge" style="background:' + (sevColors[sev]||'#8b949e') + '22;color:'+(sevColors[sev]||'#8b949e')+';margin-right:6px">'
         + sev.toUpperCase() + '</span>' + patternChips + '</span>'
-        + '<span class="alert-meta">' + ago + ' &middot; ' + fmtTime(a.timestamp) + '</span>'
+        + '<span class="alert-meta">' + fmtTimestamp(a.timestamp) + ' (' + fmtRelative(a.timestamp) + ')</span>'
         + '</div>'
         + '<div class="alert-context">Context: ' + esc(a.context)
         + (a.categories ? ' &middot; ' + (a.categories||[]).join(', ') : '') + '</div>'
@@ -1149,7 +1223,8 @@ function closeDeepDive() {
 
 function renderTurnRail() {
   const rail = document.getElementById('dd-turn-rail');
-  rail.innerHTML = ddTurns.map(function(t) {
+  const reversedTurns = ddTurns.slice().reverse();
+  rail.innerHTML = reversedTurns.map(function(t) {
     const tools = t.tools_used.slice(0, 3).map(function(name) {
       return '<span class="tool-chip">' + esc(name) + '</span>';
     }).join('');
@@ -1294,6 +1369,117 @@ document.addEventListener('keydown', function(e) {
     document.querySelectorAll('#dd-inspector .event-block').forEach(function(b) { b.classList.remove('collapsed'); });
   }
 });
+
+// ─── API Traffic ───
+let trafficData = [];
+let trafficOffset = 0;
+let trafficSort = 'timestamp';
+let trafficSortDir = 'desc';
+let trafficHasMore = false;
+
+async function loadTraffic(reset) {
+  if (reset) { trafficOffset = 0; trafficData = []; }
+  try {
+    // Load stats
+    const statsR = await fetch(API + '/api/traffic/stats');
+    const stats = await statsR.json();
+    document.getElementById('traffic-total').textContent = fmtNum(stats.total_calls || 0);
+    document.getElementById('traffic-cost').textContent = '$' + (stats.total_cost || 0).toFixed(2);
+    document.getElementById('traffic-latency').textContent = (stats.avg_latency || 0).toFixed(0) + 'ms';
+    document.getElementById('traffic-sensitive').textContent = stats.sensitive_calls || 0;
+
+    // Proxy status banner
+    const banner = document.getElementById('traffic-banner');
+    if ((stats.total_calls || 0) > 0) {
+      banner.className = 'traffic-banner active';
+      banner.innerHTML = '&#x2705; Proxy Active &mdash; ' + fmtNum(stats.total_calls) + ' API calls captured';
+    } else {
+      banner.className = 'traffic-banner inactive';
+      banner.textContent = 'No traffic data \u2014 Enable deep capture with `claude-watch --start`';
+    }
+
+    // Load traffic rows
+    const r = await fetch(API + '/api/traffic?limit=50&offset=' + trafficOffset + '&sort=' + trafficSort + '&dir=' + trafficSortDir);
+    const d = await r.json();
+    const rows = d.calls || d.traffic || [];
+    trafficHasMore = d.has_more || false;
+    trafficData = trafficData.concat(rows);
+
+    renderTrafficTable();
+
+    // Show/hide load more
+    document.getElementById('traffic-load-more').style.display = trafficHasMore ? 'block' : 'none';
+    trafficOffset += rows.length;
+  } catch(e) {
+    console.error('Traffic load error:', e);
+  }
+}
+
+function renderTrafficTable() {
+  const tbody = document.getElementById('traffic-tbody');
+  if (!trafficData.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text2);padding:32px">No API traffic data available</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = trafficData.map(function(c, idx) {
+    const statusColor = (c.status || '').toString().startsWith('2') || c.status === 'ok' ? 'var(--green)' : c.status === 'error' ? 'var(--red)' : 'var(--text2)';
+    const hasSensitive = c.sensitive_patterns && c.sensitive_patterns.length > 0;
+    const mainRow = '<tr class="expandable" onclick="toggleTrafficDetail(' + idx + ')">'
+      + '<td>' + fmtTimestamp(c.timestamp) + '</td>'
+      + '<td>' + esc(c.service || '-') + '</td>'
+      + '<td>' + esc((c.model || '-').replace('claude-', '')) + '</td>'
+      + '<td>' + fmtNum(c.input_tokens || 0) + '</td>'
+      + '<td>' + fmtNum(c.output_tokens || 0) + '</td>'
+      + '<td>$' + (c.cost || 0).toFixed(4) + '</td>'
+      + '<td>' + (c.latency || 0).toFixed(0) + 'ms</td>'
+      + '<td><span style="color:' + statusColor + '">' + esc(c.status || '-') + '</span>'
+      + (hasSensitive ? ' <span style="color:var(--red)">&#x26a0;</span>' : '') + '</td>'
+      + '</tr>';
+
+    const toolsList = (c.tool_calls || []).map(function(t) { return '<span class="badge" style="background:var(--surface2);color:var(--orange);margin:2px">' + esc(typeof t === 'string' ? t : t.name || t) + '</span>'; }).join('') || '<span style="color:var(--text2)">None</span>';
+    const sensitiveHtml = hasSensitive
+      ? '<div class="sensitive-flag">&#x26a0; ' + esc(c.sensitive_patterns.join(', ')) + '</div>'
+      : '<span style="color:var(--text2)">None detected</span>';
+    const sessionLink = c.session_id
+      ? '<a style="color:var(--cyan);cursor:pointer;text-decoration:none" onclick="event.stopPropagation();openDeepDive(\'' + c.session_id + '\')">' + esc(c.session_id.substring(0, 12)) + '...</a>'
+      : '<span style="color:var(--text2)">-</span>';
+
+    const detailRow = '<tr class="traffic-row-detail" id="traffic-detail-' + idx + '">'
+      + '<td colspan="8"><div class="traffic-detail-grid">'
+      + '<div><div class="td-label">Last User Message</div><div class="td-value" style="max-height:80px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;font-family:monospace">' + esc(c.last_user_msg_preview || '-') + '</div></div>'
+      + '<div><div class="td-label">Assistant Response</div><div class="td-value" style="max-height:80px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;font-family:monospace">' + esc(c.assistant_msg_preview || '-') + '</div></div>'
+      + '<div><div class="td-label">Tool Calls</div><div class="td-value">' + toolsList + '</div></div>'
+      + '<div><div class="td-label">Sensitive Patterns</div><div class="td-value">' + sensitiveHtml + '</div></div>'
+      + '<div><div class="td-label">Session</div><div class="td-value">' + sessionLink + '</div></div>'
+      + '<div><div class="td-label">Full Timestamp</div><div class="td-value">' + fmtDate(c.timestamp) + '</div></div>'
+      + '</div></td></tr>';
+
+    return mainRow + detailRow;
+  }).join('');
+}
+
+function toggleTrafficDetail(idx) {
+  const row = document.getElementById('traffic-detail-' + idx);
+  if (row) row.classList.toggle('open');
+}
+
+function sortTraffic(col) {
+  // Update sort direction
+  if (trafficSort === col) {
+    trafficSortDir = trafficSortDir === 'desc' ? 'asc' : 'desc';
+  } else {
+    trafficSort = col;
+    trafficSortDir = 'desc';
+  }
+
+  // Update sort arrows
+  document.querySelectorAll('.traffic-table .sort-arrow').forEach(function(el) { el.innerHTML = ''; });
+  const arrow = document.getElementById('sort-' + col);
+  if (arrow) arrow.innerHTML = trafficSortDir === 'desc' ? '&#x25BC;' : '&#x25B2;';
+
+  loadTraffic(true);
+}
 </script>
 </body>
 </html>

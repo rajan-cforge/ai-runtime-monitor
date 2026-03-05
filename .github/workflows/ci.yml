@@ -52,4 +52,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install bandit
-      - run: bandit -r src/ -s B101,B404,B603,B607 --severity-level medium || true
+      - run: bandit -r src/ -s B101,B404,B603,B607 --severity-level medium
