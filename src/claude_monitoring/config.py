@@ -10,6 +10,7 @@ Config file search paths:
 
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Use tomllib (3.11+) or tomli fallback
 if sys.version_info >= (3, 11):
@@ -64,7 +65,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-def load_config(path: str | None = None) -> dict:
+def load_config(path: Optional[str] = None) -> dict:
     """Load config from TOML file, with defaults for missing keys.
 
     Args:
@@ -223,7 +224,7 @@ cert_path = "~/.mitmproxy/mitmproxy-ca-cert.pem"
 """
 
 
-def generate_default_config(path: Path | None = None) -> Path:
+def generate_default_config(path: Optional[Path] = None) -> Path:
     """Write default config.toml with comments.
 
     Args:

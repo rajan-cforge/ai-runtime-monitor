@@ -16,8 +16,17 @@ from urllib.request import urlopen
 
 import pytest
 
+try:
+    import mitmproxy  # noqa: F401
+
+    HAS_MITMPROXY = True
+except ImportError:
+    HAS_MITMPROXY = False
+
 from claude_monitoring.constants import AI_HOSTS, CSV_COLUMNS
 from claude_monitoring.db import init_db, insert_api_call
+
+pytestmark = pytest.mark.skipif(not HAS_MITMPROXY, reason="mitmproxy not installed")
 
 # ---------------------------------------------------------------------------
 # Fixture: create a ClaudeWatchAddon with mocked config paths

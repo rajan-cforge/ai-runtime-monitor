@@ -9,7 +9,6 @@ import json
 import threading
 import time
 from http.server import HTTPServer
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,7 +20,16 @@ from claude_monitoring.constants import CSV_COLUMNS
 # ---------------------------------------------------------------------------
 
 
-def _write_csv(path: Path, rows: list[dict]) -> Path:
+def _has_matplotlib() -> bool:
+    try:
+        import matplotlib  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def _write_csv(path, rows):
     """Write a CSV file at *path* with CSV_COLUMNS header and the given rows.
 
     Each row dict may be sparse; missing columns are filled with empty strings.
@@ -350,6 +358,7 @@ class TestRunAnalyze:
 class TestRunPlot:
     """Test the run_plot function."""
 
+    @pytest.mark.skipif(not _has_matplotlib(), reason="matplotlib not installed")
     def test_no_data_prints_message(self, tmp_path, capsys):
         from claude_monitoring.watch import run_plot
 
@@ -359,6 +368,7 @@ class TestRunPlot:
         captured = capsys.readouterr().out
         assert "No CSV files found" in captured
 
+    @pytest.mark.skipif(not _has_matplotlib(), reason="matplotlib not installed")
     def test_empty_csv_prints_no_data(self, tmp_path, capsys):
         from claude_monitoring.watch import run_plot
 
