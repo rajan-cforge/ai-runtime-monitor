@@ -10,8 +10,10 @@ class TestInitDb:
         db_path = tmp_path / "test.db"
         output_dir = tmp_path / "output"
         output_dir.mkdir(exist_ok=True)
-        with patch("claude_monitoring.monitor.DB_PATH", db_path), \
-             patch("claude_monitoring.monitor.OUTPUT_DIR", output_dir):
+        with (
+            patch("claude_monitoring.monitor.DB_PATH", db_path),
+            patch("claude_monitoring.monitor.OUTPUT_DIR", output_dir),
+        ):
             conn = init_db()
         return conn, db_path
 
@@ -29,8 +31,10 @@ class TestInitDb:
         db_path = tmp_path / "test.db"
         output_dir = tmp_path / "output"
         output_dir.mkdir(exist_ok=True)
-        with patch("claude_monitoring.monitor.DB_PATH", db_path), \
-             patch("claude_monitoring.monitor.OUTPUT_DIR", output_dir):
+        with (
+            patch("claude_monitoring.monitor.DB_PATH", db_path),
+            patch("claude_monitoring.monitor.OUTPUT_DIR", output_dir),
+        ):
             conn1 = init_db()
             conn1.close()
             conn2 = init_db()
@@ -46,11 +50,9 @@ class TestInitDb:
         conn, _ = self._init(tmp_path)
         conn.execute(
             "INSERT INTO sessions (session_id, start_time, model) VALUES (?, ?, ?)",
-            ("test-123", "2026-01-01T00:00:00Z", "claude-sonnet-4")
+            ("test-123", "2026-01-01T00:00:00Z", "claude-sonnet-4"),
         )
-        conn.execute(
-            "UPDATE sessions SET total_turns = 5 WHERE session_id = ?", ("test-123",)
-        )
+        conn.execute("UPDATE sessions SET total_turns = 5 WHERE session_id = ?", ("test-123",))
         conn.commit()
         row = conn.execute("SELECT total_turns FROM sessions WHERE session_id = ?", ("test-123",)).fetchone()
         assert row[0] == 5
@@ -60,7 +62,7 @@ class TestInitDb:
         conn, _ = self._init(tmp_path)
         conn.execute(
             "INSERT INTO events (timestamp, session_id, event_type, source_layer, data_json) VALUES (?, ?, ?, ?, ?)",
-            ("2026-01-01T00:00:00Z", "sess-1", "user_prompt", "network", '{"text":"hello"}')
+            ("2026-01-01T00:00:00Z", "sess-1", "user_prompt", "network", '{"text":"hello"}'),
         )
         conn.commit()
         row = conn.execute("SELECT COUNT(*) FROM events").fetchone()
@@ -80,7 +82,7 @@ class TestInitDb:
         conn, _ = self._init(tmp_path)
         conn.execute(
             "INSERT INTO file_events (timestamp, path, operation) VALUES (?, ?, ?)",
-            ("2026-01-01T00:00:00Z", "/tmp/test.py", "created")
+            ("2026-01-01T00:00:00Z", "/tmp/test.py", "created"),
         )
         conn.commit()
         row = conn.execute("SELECT COUNT(*) FROM file_events").fetchone()
@@ -90,8 +92,7 @@ class TestInitDb:
     def test_browser_sessions_table(self, tmp_path):
         conn, _ = self._init(tmp_path)
         conn.execute(
-            "INSERT INTO browser_sessions (service, visit_time) VALUES (?, ?)",
-            ("ChatGPT", "2026-01-01T00:00:00Z")
+            "INSERT INTO browser_sessions (service, visit_time) VALUES (?, ?)", ("ChatGPT", "2026-01-01T00:00:00Z")
         )
         conn.commit()
         row = conn.execute("SELECT COUNT(*) FROM browser_sessions").fetchone()

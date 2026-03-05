@@ -46,3 +46,4 @@ MANIFEST
 
 # Claude
 .claude/
+ai-runtime-monitor/

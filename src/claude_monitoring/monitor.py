@@ -19,24 +19,23 @@ DEPENDENCIES:
   pip3 install watchdog psutil
 """
 
-import sys
+import argparse
+import json
 import os
 import re
-import json
-import time
-import sqlite3
-import signal
-import hashlib
 import shutil
-import tempfile
-import argparse
-import threading
+import signal
+import sqlite3
 import subprocess
-from pathlib import Path
-from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+import sys
+import tempfile
+import threading
+import time
 from collections import deque
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 try:
     import psutil
@@ -44,8 +43,8 @@ except ImportError:
     psutil = None
 
 try:
-    from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
 except ImportError:
     Observer = None
     FileSystemEventHandler = object
@@ -63,8 +62,14 @@ SCRIPT_PATH = Path(__file__).resolve()
 
 # Two-tier process matching to reduce false positives
 AI_PROCESS_EXACT = {
-    "claude", "Claude", "ChatGPT", "ChatGPTHelper",
-    "Ollama", "ollama", "Cursor", "Windsurf",
+    "claude",
+    "Claude",
+    "ChatGPT",
+    "ChatGPTHelper",
+    "Ollama",
+    "ollama",
+    "Cursor",
+    "Windsurf",
 }
 
 AI_PROCESS_PATTERNS = {
@@ -112,7 +117,11 @@ SERVICE_CLASSIFICATION = {
 
 # Known Anthropic API IP prefixes (GCP-hosted)
 ANTHROPIC_IP_PREFIXES = (
-    "160.79.", "137.66.", "35.185.", "34.8.", "34.49.",
+    "160.79.",
+    "137.66.",
+    "35.185.",
+    "34.8.",
+    "34.49.",
 )
 
 AI_HOSTS = {
@@ -144,79 +153,118 @@ AI_HOSTS = {
 # Sensitive patterns with severity levels: critical, high, medium, low
 SENSITIVE_PATTERNS = {
     # CRITICAL — immediate credential exposure
-    "aws_key":           {"pattern": r"(?:AKIA|ASIA|AROA|AIDA)[A-Z0-9]{16}",
-                          "severity": "critical", "category": "credential"},
-    "aws_secret":        {"pattern": r"(?i)aws.{0,20}secret.{0,20}['\"][A-Za-z0-9/+=]{40}['\"]",
-                          "severity": "critical", "category": "credential"},
-    "private_key":       {"pattern": r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----",
-                          "severity": "critical", "category": "credential"},
-    "anthropic_key":     {"pattern": r"sk-ant-[A-Za-z0-9\-_]{40,}",
-                          "severity": "critical", "category": "credential"},
-    "openai_key":        {"pattern": r"sk-[A-Za-z0-9]{32,}",
-                          "severity": "critical", "category": "credential"},
-    "github_token":      {"pattern": r"gh[pousr]_[A-Za-z0-9_]{36,}",
-                          "severity": "critical", "category": "credential"},
-    "slack_webhook":     {"pattern": r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+",
-                          "severity": "critical", "category": "credential"},
-    "discord_webhook":   {"pattern": r"https://discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+",
-                          "severity": "critical", "category": "credential"},
-    "stripe_key":        {"pattern": r"(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{20,}",
-                          "severity": "critical", "category": "credential"},
-
+    "aws_key": {"pattern": r"(?:AKIA|ASIA|AROA|AIDA)[A-Z0-9]{16}", "severity": "critical", "category": "credential"},
+    "aws_secret": {
+        "pattern": r"(?i)aws.{0,20}secret.{0,20}['\"][A-Za-z0-9/+=]{40}['\"]",
+        "severity": "critical",
+        "category": "credential",
+    },
+    "private_key": {
+        "pattern": r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----",
+        "severity": "critical",
+        "category": "credential",
+    },
+    "anthropic_key": {"pattern": r"sk-ant-[A-Za-z0-9\-_]{40,}", "severity": "critical", "category": "credential"},
+    "openai_key": {"pattern": r"sk-[A-Za-z0-9]{32,}", "severity": "critical", "category": "credential"},
+    "github_token": {"pattern": r"gh[pousr]_[A-Za-z0-9_]{36,}", "severity": "critical", "category": "credential"},
+    "slack_webhook": {
+        "pattern": r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+",
+        "severity": "critical",
+        "category": "credential",
+    },
+    "discord_webhook": {
+        "pattern": r"https://discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+",
+        "severity": "critical",
+        "category": "credential",
+    },
+    "stripe_key": {
+        "pattern": r"(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{20,}",
+        "severity": "critical",
+        "category": "credential",
+    },
     # HIGH — secrets and tokens
-    "jwt_token":         {"pattern": r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+",
-                          "severity": "high", "category": "credential"},
-    "bearer_token":      {"pattern": r"(?i)(?:Authorization|Bearer)\s*[:=]\s*['\"]?Bearer\s+[A-Za-z0-9_\-\.]{20,}",
-                          "severity": "high", "category": "credential"},
-    "password_in_code":  {"pattern": r"(?i)(?:password|passwd|pwd)\s*[:=]\s*['\"][^'\"]{6,}['\"]",
-                          "severity": "high", "category": "credential"},
-    "api_key_generic":   {"pattern": r"(?i)(?:api[_-]?key|apikey|api[_-]?secret)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{20,}",
-                          "severity": "high", "category": "credential"},
-    "db_connection":     {"pattern": r"(?i)(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis|amqp)://[^\s'\"]{10,}",
-                          "severity": "high", "category": "credential"},
-    "base64_secret":     {"pattern": r"(?i)(?:secret|token|key|auth)\s*[:=]\s*['\"]?[A-Za-z0-9+/]{40,}={0,2}['\"]?",
-                          "severity": "high", "category": "credential"},
-
+    "jwt_token": {
+        "pattern": r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+",
+        "severity": "high",
+        "category": "credential",
+    },
+    "bearer_token": {
+        "pattern": r"(?i)(?:Authorization|Bearer)\s*[:=]\s*['\"]?Bearer\s+[A-Za-z0-9_\-\.]{20,}",
+        "severity": "high",
+        "category": "credential",
+    },
+    "password_in_code": {
+        "pattern": r"(?i)(?:password|passwd|pwd)\s*[:=]\s*['\"][^'\"]{6,}['\"]",
+        "severity": "high",
+        "category": "credential",
+    },
+    "api_key_generic": {
+        "pattern": r"(?i)(?:api[_-]?key|apikey|api[_-]?secret)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{20,}",
+        "severity": "high",
+        "category": "credential",
+    },
+    "db_connection": {
+        "pattern": r"(?i)(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis|amqp)://[^\s'\"]{10,}",
+        "severity": "high",
+        "category": "credential",
+    },
+    "base64_secret": {
+        "pattern": r"(?i)(?:secret|token|key|auth)\s*[:=]\s*['\"]?[A-Za-z0-9+/]{40,}={0,2}['\"]?",
+        "severity": "high",
+        "category": "credential",
+    },
     # MEDIUM — PII and sensitive data
-    "ssn":               {"pattern": r"\b\d{3}-\d{2}-\d{4}\b",
-                          "severity": "medium", "category": "pii"},
-    "credit_card":       {"pattern": r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{3,4}\b",
-                          "severity": "medium", "category": "pii"},
-    "phone_number":      {"pattern": r"\b(?:\+1[- ]?)?\(?\d{3}\)?[- ]?\d{3}[- ]?\d{4}\b",
-                          "severity": "medium", "category": "pii"},
-    "email_bulk":        {"pattern": r"(?:[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\s*[,;\n]\s*){3,}",
-                          "severity": "medium", "category": "pii"},
-
+    "ssn": {"pattern": r"\b\d{3}-\d{2}-\d{4}\b", "severity": "medium", "category": "pii"},
+    "credit_card": {
+        "pattern": r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{3,4}\b",
+        "severity": "medium",
+        "category": "pii",
+    },
+    "phone_number": {
+        "pattern": r"\b(?:\+1[- ]?)?\(?\d{3}\)?[- ]?\d{3}[- ]?\d{4}\b",
+        "severity": "medium",
+        "category": "pii",
+    },
+    "email_bulk": {
+        "pattern": r"(?:[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\s*[,;\n]\s*){3,}",
+        "severity": "medium",
+        "category": "pii",
+    },
     # LOW — informational / policy
-    "env_file":          {"pattern": r"\.env(?:\.[a-z]+)?",
-                          "severity": "low", "category": "policy"},
-    "internal_url":      {"pattern": r"https?://(?:internal|staging|dev|local|corp|intranet)\.[a-z0-9.-]+",
-                          "severity": "low", "category": "policy"},
-    "ip_address_private":{"pattern": r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b",
-                          "severity": "low", "category": "policy"},
+    "env_file": {"pattern": r"\.env(?:\.[a-z]+)?", "severity": "low", "category": "policy"},
+    "internal_url": {
+        "pattern": r"https?://(?:internal|staging|dev|local|corp|intranet)\.[a-z0-9.-]+",
+        "severity": "low",
+        "category": "policy",
+    },
+    "ip_address_private": {
+        "pattern": r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b",
+        "severity": "low",
+        "category": "policy",
+    },
 }
 
 # Severity ordering for display
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 MODEL_PRICING = {
-    "claude-opus-4":     {"input": 15.00, "output": 75.00},
-    "claude-sonnet-4":   {"input": 3.00,  "output": 15.00},
-    "claude-haiku-4":    {"input": 0.80,  "output": 4.00},
-    "claude-3-5-sonnet": {"input": 3.00,  "output": 15.00},
-    "claude-3-5-haiku":  {"input": 0.80,  "output": 4.00},
-    "claude-3-opus":     {"input": 15.00, "output": 75.00},
-    "default":           {"input": 3.00,  "output": 15.00},
+    "claude-opus-4": {"input": 15.00, "output": 75.00},
+    "claude-sonnet-4": {"input": 3.00, "output": 15.00},
+    "claude-haiku-4": {"input": 0.80, "output": 4.00},
+    "claude-3-5-sonnet": {"input": 3.00, "output": 15.00},
+    "claude-3-5-haiku": {"input": 0.80, "output": 4.00},
+    "claude-3-opus": {"input": 15.00, "output": 75.00},
+    "default": {"input": 3.00, "output": 15.00},
 }
 
 # Subscription plan token limits (approximate monthly input+output tokens)
 # Based on public Claude plan rate limits
 PLAN_LIMITS = {
-    "max_20x":       {"monthly_tokens": 900_000_000,  "label": "Max 20x"},
-    "max_5x":        {"monthly_tokens": 225_000_000,  "label": "Max 5x"},
-    "max":           {"monthly_tokens": 45_000_000,   "label": "Max"},
-    "pro":           {"monthly_tokens": 45_000_000,   "label": "Pro"},
-    "free":          {"monthly_tokens": 5_000_000,    "label": "Free"},
+    "max_20x": {"monthly_tokens": 900_000_000, "label": "Max 20x"},
+    "max_5x": {"monthly_tokens": 225_000_000, "label": "Max 5x"},
+    "max": {"monthly_tokens": 45_000_000, "label": "Max"},
+    "pro": {"monthly_tokens": 45_000_000, "label": "Pro"},
+    "free": {"monthly_tokens": 5_000_000, "label": "Free"},
 }
 
 # In-memory live feed buffer
@@ -234,6 +282,7 @@ plan_info = {"is_subscription": False, "plan_tier": "", "cost_label": "Total Cos
 # ─────────────────────────────────────────────────────────────
 # SECTION 2: SQLITE EVENT STORE
 # ─────────────────────────────────────────────────────────────
+
 
 def init_db():
     """Initialize SQLite database with all required tables."""
@@ -345,6 +394,7 @@ def get_thread_db():
 # SECTION 3: UTILITY FUNCTIONS
 # ─────────────────────────────────────────────────────────────
 
+
 def scan_sensitive(text):
     """Return list of dicts with pattern name, severity, category for matches found."""
     found = []
@@ -356,11 +406,13 @@ def scan_sensitive(text):
         pattern = info["pattern"]
         try:
             if re.search(pattern, scan_text):
-                found.append({
-                    "name": name,
-                    "severity": info["severity"],
-                    "category": info["category"],
-                })
+                found.append(
+                    {
+                        "name": name,
+                        "severity": info["severity"],
+                        "category": info["category"],
+                    }
+                )
         except re.error:
             continue
     return found
@@ -373,10 +425,12 @@ def estimate_cost(model, input_tokens, output_tokens, cache_read=0, cache_write=
         if key != "default" and key in (model or ""):
             pricing = MODEL_PRICING[key]
             break
-    cost = (input_tokens / 1_000_000 * pricing["input"] +
-            output_tokens / 1_000_000 * pricing["output"] +
-            cache_read / 1_000_000 * pricing["input"] * 0.1 +
-            cache_write / 1_000_000 * pricing["input"] * 1.25)
+    cost = (
+        input_tokens / 1_000_000 * pricing["input"]
+        + output_tokens / 1_000_000 * pricing["output"]
+        + cache_read / 1_000_000 * pricing["input"] * 0.1
+        + cache_write / 1_000_000 * pricing["input"] * 1.25
+    )
     return round(cost, 6)
 
 
@@ -433,13 +487,15 @@ def compute_forecast(db):
 
     daily = []
     for r in rows:
-        total = (r['input_t'] or 0) + (r['output_t'] or 0)
-        daily.append({
-            "day": r['day'],
-            "input_tokens": r['input_t'] or 0,
-            "output_tokens": r['output_t'] or 0,
-            "total_tokens": total,
-        })
+        total = (r["input_t"] or 0) + (r["output_t"] or 0)
+        daily.append(
+            {
+                "day": r["day"],
+                "input_tokens": r["input_t"] or 0,
+                "output_tokens": r["output_t"] or 0,
+                "total_tokens": total,
+            }
+        )
 
     forecast["daily_breakdown"] = daily
 
@@ -513,10 +569,7 @@ def detect_plan_info():
                 stats = json.load(f)
             model_usage = stats.get("modelUsage", {})
             if model_usage:
-                all_zero = all(
-                    m.get("costUSD", 0) == 0
-                    for m in model_usage.values()
-                )
+                all_zero = all(m.get("costUSD", 0) == 0 for m in model_usage.values())
                 if all_zero:
                     info["is_subscription"] = True
         except Exception:
@@ -559,6 +612,7 @@ def detect_plan_info():
 # SECTION 4: JSONL SESSION WATCHER (Layer 1a — Network/Content)
 # ─────────────────────────────────────────────────────────────
 
+
 class JSONLSessionWatcher:
     """Watches Claude JSONL transcript files for new data."""
 
@@ -583,14 +637,13 @@ class JSONLSessionWatcher:
                      last_activity=excluded.last_activity,
                      cwd=COALESCE(excluded.cwd, sessions.cwd),
                      jsonl_path=COALESCE(excluded.jsonl_path, sessions.jsonl_path)""",
-                (session_id, start_time or now_iso(), cwd, str(jsonl_path), now_iso())
+                (session_id, start_time or now_iso(), cwd, str(jsonl_path), now_iso()),
             )
             self.db.commit()
         except Exception:
             pass
 
-    def _update_session_stats(self, session_id, model=None, cost=0,
-                               input_tokens=0, output_tokens=0, is_turn=False):
+    def _update_session_stats(self, session_id, model=None, cost=0, input_tokens=0, output_tokens=0, is_turn=False):
         """Update session aggregate statistics."""
         try:
             parts = ["last_activity=?"]
@@ -610,9 +663,7 @@ class JSONLSessionWatcher:
             if is_turn:
                 parts.append("total_turns=total_turns+1")
             vals.append(session_id)
-            self.db.execute(
-                f"UPDATE sessions SET {', '.join(parts)} WHERE session_id=?", vals
-            )
+            self.db.execute(f"UPDATE sessions SET {', '.join(parts)} WHERE session_id=?", vals)
             self.db.commit()
         except Exception:
             pass
@@ -623,7 +674,7 @@ class JSONLSessionWatcher:
         try:
             self.db.execute(
                 "INSERT INTO events (timestamp, session_id, event_type, source_layer, data_json) VALUES (?,?,?,?,?)",
-                (timestamp, session_id, event_type, source, data_json)
+                (timestamp, session_id, event_type, source, data_json),
             )
             self._pending_commits += 1
             # Batch commits for performance during backfill
@@ -651,21 +702,21 @@ class JSONLSessionWatcher:
             text = data.get("text", "")
             return f'response: "{text[:80]}..."' if len(text) > 80 else f'response: "{text}"'
         elif event_type == "thinking":
-            return f'thinking ({data.get("length", 0)} chars)'
+            return f"thinking ({data.get('length', 0)} chars)"
         elif event_type == "tool_use":
             name = data.get("name", "?")
             inp = data.get("input_preview", "")
-            return f'{name}: {inp[:60]}'
+            return f"{name}: {inp[:60]}"
         elif event_type == "tool_result":
-            return f'result ({data.get("length", 0)} chars)'
+            return f"result ({data.get('length', 0)} chars)"
         elif event_type == "token_usage":
             inp = data.get("input_tokens", 0)
             out = data.get("output_tokens", 0)
             cost = data.get("cost", 0)
-            return f'↑{inp}t ↓{out}t ${cost:.4f}'
+            return f"↑{inp}t ↓{out}t ${cost:.4f}"
         elif event_type == "sensitive_data":
             sev = data.get("severity", "medium").upper()
-            return f'ALERT [{sev}]: {", ".join(data.get("patterns", []))}'
+            return f"ALERT [{sev}]: {', '.join(data.get('patterns', []))}"
         else:
             return event_type
 
@@ -684,14 +735,14 @@ class JSONLSessionWatcher:
                 return
 
             try:
-                with open(path_str, 'r', encoding='utf-8', errors='replace') as f:
+                with open(path_str, encoding="utf-8", errors="replace") as f:
                     f.seek(last_pos)
                     new_data = f.read()
                     self.file_positions[path_str] = f.tell()
-            except (OSError, IOError):
+            except OSError:
                 return
 
-        for line in new_data.strip().split('\n'):
+        for line in new_data.strip().split("\n"):
             if not line.strip():
                 continue
             try:
@@ -738,8 +789,9 @@ class JSONLSessionWatcher:
             elif rec_type == "assistant":
                 self._process_assistant_message(record, session_id, timestamp)
             elif rec_type == "system":
-                self._store_event(timestamp, session_id, "system_event", "network",
-                                  {"subtype": record.get("subtype", "")})
+                self._store_event(
+                    timestamp, session_id, "system_event", "network", {"subtype": record.get("subtype", "")}
+                )
             elif rec_type == "progress":
                 self._process_progress(record, session_id, timestamp)
         except Exception:
@@ -749,21 +801,17 @@ class JSONLSessionWatcher:
         """Set session title from first user message if not already set."""
         try:
             row = self.db.execute(
-                "SELECT title, total_turns FROM sessions WHERE session_id=?",
-                (session_id,)
+                "SELECT title, total_turns FROM sessions WHERE session_id=?", (session_id,)
             ).fetchone()
             if row and not row[0] and (row[1] or 0) <= 1:
                 # Truncate at word boundary around 100 chars
                 title = text[:120]
                 if len(text) > 120:
-                    last_space = title.rfind(' ')
+                    last_space = title.rfind(" ")
                     if last_space > 60:
                         title = title[:last_space]
                     title = title.rstrip() + "..."
-                self.db.execute(
-                    "UPDATE sessions SET title=? WHERE session_id=?",
-                    (title, session_id)
-                )
+                self.db.execute("UPDATE sessions SET title=? WHERE session_id=?", (title, session_id))
                 self.db.commit()
         except Exception:
             pass
@@ -775,8 +823,7 @@ class JSONLSessionWatcher:
 
         if isinstance(content, str):
             # Simple text prompt
-            self._store_event(timestamp, session_id, "user_prompt", "network",
-                              {"text": content, "role": "user"})
+            self._store_event(timestamp, session_id, "user_prompt", "network", {"text": content, "role": "user"})
             self._check_sensitive(content, session_id, timestamp, "user_prompt")
             self._update_session_stats(session_id, is_turn=True)
             self._set_session_title(session_id, content)
@@ -789,8 +836,7 @@ class JSONLSessionWatcher:
 
                 if btype == "text":
                     text = block.get("text", "")
-                    self._store_event(timestamp, session_id, "user_prompt", "network",
-                                      {"text": text, "role": "user"})
+                    self._store_event(timestamp, session_id, "user_prompt", "network", {"text": text, "role": "user"})
                     self._check_sensitive(text, session_id, timestamp, "user_prompt")
                     self._update_session_stats(session_id, is_turn=True)
                     self._set_session_title(session_id, text)
@@ -805,12 +851,18 @@ class JSONLSessionWatcher:
                                 parts.append(rc.get("text", ""))
                         result_content = "\n".join(parts)
                     result_str = str(result_content)
-                    self._store_event(timestamp, session_id, "tool_result", "network", {
-                        "tool_use_id": tool_use_id,
-                        "content": result_str[:5000],
-                        "length": len(result_str),
-                        "is_error": block.get("is_error", False),
-                    })
+                    self._store_event(
+                        timestamp,
+                        session_id,
+                        "tool_result",
+                        "network",
+                        {
+                            "tool_use_id": tool_use_id,
+                            "content": result_str[:5000],
+                            "length": len(result_str),
+                            "is_error": block.get("is_error", False),
+                        },
+                    )
                     self._check_sensitive(result_str, session_id, timestamp, "tool_result")
 
     def _process_assistant_message(self, record, session_id, timestamp):
@@ -834,18 +886,30 @@ class JSONLSessionWatcher:
 
             if btype == "thinking":
                 thinking_text = block.get("thinking", "")
-                self._store_event(timestamp, session_id, "thinking", "network", {
-                    "text": thinking_text[:5000],
-                    "length": len(thinking_text),
-                })
+                self._store_event(
+                    timestamp,
+                    session_id,
+                    "thinking",
+                    "network",
+                    {
+                        "text": thinking_text[:5000],
+                        "length": len(thinking_text),
+                    },
+                )
 
             elif btype == "text":
                 text = block.get("text", "")
-                self._store_event(timestamp, session_id, "assistant_response", "network", {
-                    "text": text,
-                    "model": model,
-                    "stop_reason": stop_reason,
-                })
+                self._store_event(
+                    timestamp,
+                    session_id,
+                    "assistant_response",
+                    "network",
+                    {
+                        "text": text,
+                        "model": model,
+                        "stop_reason": stop_reason,
+                    },
+                )
                 self._check_sensitive(text, session_id, timestamp, "assistant_response")
 
             elif btype == "tool_use":
@@ -872,29 +936,40 @@ class JSONLSessionWatcher:
                 else:
                     input_preview = json.dumps(tool_input, default=str)[:200]
 
-                self._store_event(timestamp, session_id, "tool_use", "network", {
-                    "name": tool_name,
-                    "id": tool_id,
-                    "input": tool_input,
-                    "input_preview": input_preview,
-                })
-                self._check_sensitive(json.dumps(tool_input, default=str),
-                                       session_id, timestamp, f"tool:{tool_name}")
+                self._store_event(
+                    timestamp,
+                    session_id,
+                    "tool_use",
+                    "network",
+                    {
+                        "name": tool_name,
+                        "id": tool_id,
+                        "input": tool_input,
+                        "input_preview": input_preview,
+                    },
+                )
+                self._check_sensitive(json.dumps(tool_input, default=str), session_id, timestamp, f"tool:{tool_name}")
 
         # Store token usage event
         if input_tokens or output_tokens:
-            self._store_event(timestamp, session_id, "token_usage", "network", {
-                "model": model,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_read_tokens": cache_read,
-                "cache_write_tokens": cache_write,
-                "cost": cost,
-                "stop_reason": stop_reason,
-            })
-            self._update_session_stats(session_id, model=model, cost=cost,
-                                        input_tokens=input_tokens,
-                                        output_tokens=output_tokens)
+            self._store_event(
+                timestamp,
+                session_id,
+                "token_usage",
+                "network",
+                {
+                    "model": model,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cache_read_tokens": cache_read,
+                    "cache_write_tokens": cache_write,
+                    "cost": cost,
+                    "stop_reason": stop_reason,
+                },
+            )
+            self._update_session_stats(
+                session_id, model=model, cost=cost, input_tokens=input_tokens, output_tokens=output_tokens
+            )
 
     def _process_progress(self, record, session_id, timestamp):
         """Process a progress record."""
@@ -903,10 +978,16 @@ class JSONLSessionWatcher:
         if dtype == "bash_progress":
             output = data.get("output", "") or data.get("fullOutput", "")
             if output:
-                self._store_event(timestamp, session_id, "bash_progress", "network", {
-                    "output": output[:2000],
-                    "elapsed": data.get("elapsedTimeSeconds", 0),
-                })
+                self._store_event(
+                    timestamp,
+                    session_id,
+                    "bash_progress",
+                    "network",
+                    {
+                        "output": output[:2000],
+                        "elapsed": data.get("elapsedTimeSeconds", 0),
+                    },
+                )
 
     def _check_sensitive(self, text, session_id, timestamp, context):
         """Scan text for sensitive patterns and store alerts."""
@@ -915,17 +996,22 @@ class JSONLSessionWatcher:
         matches = scan_sensitive(text)
         if matches:
             # Find highest severity
-            severity = min((m["severity"] for m in matches),
-                           key=lambda s: SEVERITY_ORDER.get(s, 99))
+            severity = min((m["severity"] for m in matches), key=lambda s: SEVERITY_ORDER.get(s, 99))
             pattern_names = [m["name"] for m in matches]
             categories = list(set(m["category"] for m in matches))
-            self._store_event(timestamp, session_id, "sensitive_data", "network", {
-                "patterns": pattern_names,
-                "severity": severity,
-                "categories": categories,
-                "context": context,
-                "snippet": text[:200],
-            })
+            self._store_event(
+                timestamp,
+                session_id,
+                "sensitive_data",
+                "network",
+                {
+                    "patterns": pattern_names,
+                    "severity": severity,
+                    "categories": categories,
+                    "context": context,
+                    "snippet": text[:200],
+                },
+            )
 
 
 class JSONLFileHandler(FileSystemEventHandler):
@@ -938,19 +1024,20 @@ class JSONLFileHandler(FileSystemEventHandler):
     def on_modified(self, event):
         if event.is_directory:
             return
-        if event.src_path.endswith('.jsonl'):
+        if event.src_path.endswith(".jsonl"):
             self.watcher.process_jsonl_file(event.src_path)
 
     def on_created(self, event):
         if event.is_directory:
             return
-        if event.src_path.endswith('.jsonl'):
+        if event.src_path.endswith(".jsonl"):
             self.watcher.process_jsonl_file(event.src_path)
 
 
 # ─────────────────────────────────────────────────────────────
 # SECTION 5: PROCESS SCANNER (Layer 3)
 # ─────────────────────────────────────────────────────────────
+
 
 class ProcessScanner:
     """Scans for AI agent processes and tracks their lifecycle."""
@@ -972,14 +1059,14 @@ class ProcessScanner:
         current_pids = set()
 
         try:
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline',
-                                              'cpu_percent', 'memory_percent',
-                                              'create_time', 'status']):
+            for proc in psutil.process_iter(
+                ["pid", "name", "cmdline", "cpu_percent", "memory_percent", "create_time", "status"]
+            ):
                 try:
                     info = proc.info
-                    pid = info['pid']
-                    name = info.get('name') or ''
-                    cmdline_str = ' '.join(info.get('cmdline') or [])
+                    pid = info["pid"]
+                    name = info.get("name") or ""
+                    cmdline_str = " ".join(info.get("cmdline") or [])
 
                     # Get executable path for system service detection
                     try:
@@ -995,12 +1082,12 @@ class ProcessScanner:
                         "pid": pid,
                         "name": name,
                         "cmdline": cmdline_str[:500],
-                        "cpu_percent": info.get('cpu_percent', 0) or 0,
-                        "memory_percent": round(info.get('memory_percent', 0) or 0, 2),
-                        "status": info.get('status', ''),
-                        "create_time": datetime.fromtimestamp(
-                            info.get('create_time', 0), tz=timezone.utc
-                        ).isoformat() if info.get('create_time') else '',
+                        "cpu_percent": info.get("cpu_percent", 0) or 0,
+                        "memory_percent": round(info.get("memory_percent", 0) or 0, 2),
+                        "status": info.get("status", ""),
+                        "create_time": datetime.fromtimestamp(info.get("create_time", 0), tz=timezone.utc).isoformat()
+                        if info.get("create_time")
+                        else "",
                     }
                     found.append(proc_data)
 
@@ -1012,26 +1099,34 @@ class ProcessScanner:
                                 """INSERT INTO processes (pid, name, cmdline, start_time,
                                    cpu_percent, memory_percent, status)
                                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                                (pid, proc_data["name"], proc_data["cmdline"],
-                                 proc_data["create_time"], proc_data["cpu_percent"],
-                                 proc_data["memory_percent"], "running")
+                                (
+                                    pid,
+                                    proc_data["name"],
+                                    proc_data["cmdline"],
+                                    proc_data["create_time"],
+                                    proc_data["cpu_percent"],
+                                    proc_data["memory_percent"],
+                                    "running",
+                                ),
                             )
                             self.db.commit()
                         except Exception:
                             pass
-                        push_live_event({
-                            "timestamp": now_iso(),
-                            "event_type": "process_start",
-                            "source": "process",
-                            "summary": f'NEW: {proc_data["name"]} (PID {pid})',
-                        })
+                        push_live_event(
+                            {
+                                "timestamp": now_iso(),
+                                "event_type": "process_start",
+                                "source": "process",
+                                "summary": f"NEW: {proc_data['name']} (PID {pid})",
+                            }
+                        )
                     else:
                         # Update existing process
                         self.known_pids[pid] = proc_data
                         try:
                             self.db.execute(
                                 "UPDATE processes SET cpu_percent=?, memory_percent=? WHERE pid=? AND end_time IS NULL",
-                                (proc_data["cpu_percent"], proc_data["memory_percent"], pid)
+                                (proc_data["cpu_percent"], proc_data["memory_percent"], pid),
                             )
                             self.db.commit()
                         except Exception:
@@ -1050,17 +1145,19 @@ class ProcessScanner:
             try:
                 self.db.execute(
                     "UPDATE processes SET end_time=?, status='terminated' WHERE pid=? AND end_time IS NULL",
-                    (now_iso(), pid)
+                    (now_iso(), pid),
                 )
                 self.db.commit()
             except Exception:
                 pass
-            push_live_event({
-                "timestamp": now_iso(),
-                "event_type": "process_stop",
-                "source": "process",
-                "summary": f'STOPPED: {old["name"]} (PID {pid})',
-            })
+            push_live_event(
+                {
+                    "timestamp": now_iso(),
+                    "event_type": "process_stop",
+                    "source": "process",
+                    "summary": f"STOPPED: {old['name']} (PID {pid})",
+                }
+            )
 
         return found
 
@@ -1074,6 +1171,7 @@ class ProcessScanner:
 # ─────────────────────────────────────────────────────────────
 # SECTION 6: NETWORK CONNECTION MONITOR (Layer 1b)
 # ─────────────────────────────────────────────────────────────
+
 
 class NetworkMonitor:
     """Monitors network connections from AI agent processes."""
@@ -1093,6 +1191,7 @@ class NetworkMonitor:
             return self._dns_cache[ip]
         try:
             import socket
+
             hostname = socket.gethostbyaddr(ip)[0]
             self._dns_cache[ip] = hostname
             return hostname
@@ -1113,7 +1212,7 @@ class NetworkMonitor:
                 return friendly, host
 
         # If host looks like an IP, try known IP prefixes first
-        if host and (host[0].isdigit() or ':' in host):
+        if host and (host[0].isdigit() or ":" in host):
             if any(host.startswith(pfx) for pfx in ANTHROPIC_IP_PREFIXES):
                 return "Anthropic API", host
 
@@ -1136,22 +1235,22 @@ class NetworkMonitor:
 
         found = []
         try:
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
                 try:
                     info = proc.info
-                    name = info.get('name') or ''
-                    cmdline_str = ' '.join(info.get('cmdline') or [])
+                    name = info.get("name") or ""
+                    cmdline_str = " ".join(info.get("cmdline") or [])
                     if not is_ai_process(name, cmdline_str):
                         continue
 
-                    pid = info['pid']
+                    pid = info["pid"]
                     try:
-                        conns = proc.net_connections(kind='inet')
+                        conns = proc.net_connections(kind="inet")
                     except (psutil.AccessDenied, psutil.NoSuchProcess):
                         continue
 
                     for conn in conns:
-                        if conn.status != 'ESTABLISHED' or not conn.raddr:
+                        if conn.status != "ESTABLISHED" or not conn.raddr:
                             continue
                         remote_host = conn.raddr.ip
                         remote_port = conn.raddr.port
@@ -1165,7 +1264,7 @@ class NetworkMonitor:
                         display_host = resolved_host if resolved_host != remote_host else remote_host
                         conn_data = {
                             "pid": pid,
-                            "process_name": info.get('name', ''),
+                            "process_name": info.get("name", ""),
                             "remote_host": display_host,
                             "remote_ip": remote_host,
                             "remote_port": remote_port,
@@ -1179,21 +1278,29 @@ class NetworkMonitor:
                                 """INSERT INTO connections
                                    (timestamp, pid, process_name, remote_host, remote_port, status, service)
                                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                                (now_iso(), pid, conn_data["process_name"],
-                                 display_host, remote_port, conn.status,
-                                 conn_data["service"])
+                                (
+                                    now_iso(),
+                                    pid,
+                                    conn_data["process_name"],
+                                    display_host,
+                                    remote_port,
+                                    conn.status,
+                                    conn_data["service"],
+                                ),
                             )
                             self.db.commit()
                         except Exception:
                             pass
 
                         if service:
-                            push_live_event({
-                                "timestamp": now_iso(),
-                                "event_type": "connection",
-                                "source": "network",
-                                "summary": f'{info.get("name","?")} → {display_host}:{remote_port} ({service})',
-                            })
+                            push_live_event(
+                                {
+                                    "timestamp": now_iso(),
+                                    "event_type": "connection",
+                                    "source": "network",
+                                    "summary": f"{info.get('name', '?')} → {display_host}:{remote_port} ({service})",
+                                }
+                            )
 
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
@@ -1217,6 +1324,7 @@ class NetworkMonitor:
 # SECTION 7: FILE ACTIVITY MONITOR (Layer 2)
 # ─────────────────────────────────────────────────────────────
 
+
 class FileActivityHandler(FileSystemEventHandler):
     """Monitors file changes in AI agent working directories."""
 
@@ -1224,8 +1332,7 @@ class FileActivityHandler(FileSystemEventHandler):
         super().__init__()
         self.db = get_thread_db()
         # Ignore patterns
-        self._ignore = {'.git', '__pycache__', 'node_modules', '.DS_Store',
-                        '.pyc', '.pyo', '.swp', '.swo'}
+        self._ignore = {".git", "__pycache__", "node_modules", ".DS_Store", ".pyc", ".pyo", ".swp", ".swo"}
 
     def _should_ignore(self, path):
         parts = Path(path).parts
@@ -1247,18 +1354,20 @@ class FileActivityHandler(FileSystemEventHandler):
         try:
             self.db.execute(
                 "INSERT INTO file_events (timestamp, path, operation, size) VALUES (?, ?, ?, ?)",
-                (timestamp, path, operation, size)
+                (timestamp, path, operation, size),
             )
             self.db.commit()
         except Exception:
             pass
 
-        push_live_event({
-            "timestamp": timestamp,
-            "event_type": f"file_{operation}",
-            "source": "filesystem",
-            "summary": f'{operation}: {Path(path).name} ({size} bytes)',
-        })
+        push_live_event(
+            {
+                "timestamp": timestamp,
+                "event_type": f"file_{operation}",
+                "source": "filesystem",
+                "summary": f"{operation}: {Path(path).name} ({size} bytes)",
+            }
+        )
 
     def on_created(self, event):
         self._record(event, "created")
@@ -1274,6 +1383,7 @@ class FileActivityHandler(FileSystemEventHandler):
 # SECTION 7b: CHROME HISTORY WATCHER (Browser AI)
 # ─────────────────────────────────────────────────────────────
 
+
 class ChromeHistoryWatcher:
     """Watches Chrome browser history for AI service visits."""
 
@@ -1281,10 +1391,7 @@ class ChromeHistoryWatcher:
         self.db = get_thread_db()
         self._stop = threading.Event()
         self.last_check_times = {}  # profile_path -> last chrome timestamp
-        self.chrome_dir = (
-            Path.home() / "Library" / "Application Support"
-            / "Google" / "Chrome"
-        )
+        self.chrome_dir = Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
 
     def stop(self):
         self._stop.set()
@@ -1333,15 +1440,13 @@ class ChromeHistoryWatcher:
             return []
 
         all_found = []
-        url_conditions = " OR ".join(
-            f"urls.url LIKE '%{domain}%'" for domain in BROWSER_AI_PATTERNS
-        )
+        url_conditions = " OR ".join(f"urls.url LIKE '%{domain}%'" for domain in BROWSER_AI_PATTERNS)
 
         for hist_path in history_files:
             profile_key = str(hist_path)
             tmp_path = None
             try:
-                tmp_fd, tmp_path = tempfile.mkstemp(suffix='.db')
+                tmp_fd, tmp_path = tempfile.mkstemp(suffix=".db")
                 os.close(tmp_fd)
                 shutil.copy2(str(hist_path), tmp_path)
 
@@ -1367,10 +1472,10 @@ class ChromeHistoryWatcher:
                 rows = conn.execute(query, (cutoff,)).fetchall()
 
                 for row in rows:
-                    url = row['url']
-                    title = row['title'] or ''
-                    visit_time = row['visit_time']
-                    duration = (row['visit_duration'] or 0) / 1_000_000
+                    url = row["url"]
+                    title = row["title"] or ""
+                    visit_time = row["visit_time"]
+                    duration = (row["visit_duration"] or 0) / 1_000_000
 
                     service = None
                     for domain, svc in BROWSER_AI_PATTERNS.items():
@@ -1388,32 +1493,35 @@ class ChromeHistoryWatcher:
                             """INSERT INTO browser_sessions
                                (service, url, title, conversation_id, visit_time, duration_seconds)
                                VALUES (?, ?, ?, ?, ?, ?)""",
-                            (service, url, title, conv_id, visit_iso, duration)
+                            (service, url, title, conv_id, visit_iso, duration),
                         )
                     except Exception:
                         pass
 
-                    all_found.append({
-                        "service": service,
-                        "title": title,
-                        "url": url,
-                        "visit_time": visit_iso,
-                        "duration": duration,
-                        "conversation_id": conv_id,
-                    })
+                    all_found.append(
+                        {
+                            "service": service,
+                            "title": title,
+                            "url": url,
+                            "visit_time": visit_iso,
+                            "duration": duration,
+                            "conversation_id": conv_id,
+                        }
+                    )
 
                     if visit_time > self.last_check_times.get(profile_key, 0):
                         self.last_check_times[profile_key] = visit_time
 
-                    push_live_event({
-                        "timestamp": visit_iso,
-                        "event_type": "browser_ai",
-                        "source": "browser",
-                        "summary": (
-                            f'BROWSER: {service} — {title[:60]}'
-                            + (f' ({int(duration)}s)' if duration else '')
-                        ),
-                    })
+                    push_live_event(
+                        {
+                            "timestamp": visit_iso,
+                            "event_type": "browser_ai",
+                            "source": "browser",
+                            "summary": (
+                                f"BROWSER: {service} — {title[:60]}" + (f" ({int(duration)}s)" if duration else "")
+                            ),
+                        }
+                    )
 
                 conn.close()
 
@@ -1445,6 +1553,7 @@ class ChromeHistoryWatcher:
 # SECTION 8: WEB DASHBOARD SERVER
 # ─────────────────────────────────────────────────────────────
 
+
 class DashboardHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the dashboard."""
 
@@ -1457,39 +1566,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
 
         routes = {
-            '/': self._serve_dashboard,
-            '/api/sessions': self._api_sessions,
-            '/api/session': self._api_session_detail,
-            '/api/feed': self._api_feed,
-            '/api/stats': self._api_stats,
-            '/api/processes': self._api_processes,
-            '/api/files': self._api_files,
-            '/api/connections': self._api_connections,
-            '/api/browser': self._api_browser,
-            '/api/alerts': self._api_alerts,
-            '/api/session_turns': self._api_session_turns,
-            '/api/browser/sessions': self._api_browser_sessions,
-            '/api/browser/session_detail': self._api_browser_session_detail,
-            '/api/activity/timeline': self._api_activity_timeline,
-            '/api/process_detail': self._api_process_detail,
-            '/api/export': self._api_export,
+            "/": self._serve_dashboard,
+            "/api/sessions": self._api_sessions,
+            "/api/session": self._api_session_detail,
+            "/api/feed": self._api_feed,
+            "/api/stats": self._api_stats,
+            "/api/processes": self._api_processes,
+            "/api/files": self._api_files,
+            "/api/connections": self._api_connections,
+            "/api/browser": self._api_browser,
+            "/api/alerts": self._api_alerts,
+            "/api/session_turns": self._api_session_turns,
+            "/api/browser/sessions": self._api_browser_sessions,
+            "/api/browser/session_detail": self._api_browser_session_detail,
+            "/api/activity/timeline": self._api_activity_timeline,
+            "/api/process_detail": self._api_process_detail,
+            "/api/export": self._api_export,
         }
 
         # Match path prefixes for dynamic routes
-        if path.startswith('/api/browser/session/'):
-            params['conversation_id'] = [path.split('/api/browser/session/')[1]]
-            path = '/api/browser/session_detail'
-        elif path.startswith('/api/process/'):
-            params['pid'] = [path.split('/api/process/')[1]]
-            path = '/api/process_detail'
-        elif path.startswith('/api/session/'):
-            remainder = path.split('/api/session/')[1]
-            if remainder.endswith('/turns'):
-                params['id'] = [remainder[:-len('/turns')]]
-                path = '/api/session_turns'
+        if path.startswith("/api/browser/session/"):
+            params["conversation_id"] = [path.split("/api/browser/session/")[1]]
+            path = "/api/browser/session_detail"
+        elif path.startswith("/api/process/"):
+            params["pid"] = [path.split("/api/process/")[1]]
+            path = "/api/process_detail"
+        elif path.startswith("/api/session/"):
+            remainder = path.split("/api/session/")[1]
+            if remainder.endswith("/turns"):
+                params["id"] = [remainder[: -len("/turns")]]
+                path = "/api/session_turns"
             else:
-                params['id'] = [remainder]
-                path = '/api/session'
+                params["id"] = [remainder]
+                path = "/api/session"
 
         handler = routes.get(path)
         if handler:
@@ -1501,19 +1610,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "not found", "path": path}, 404)
 
     def _send_json(self, data, status=200):
-        body = json.dumps(data, default=str).encode('utf-8')
+        body = json.dumps(data, default=str).encode("utf-8")
         self.send_response(status)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Content-Length', len(body))
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", len(body))
         self.end_headers()
         self.wfile.write(body)
 
     def _send_html(self, html):
-        body = html.encode('utf-8')
+        body = html.encode("utf-8")
         self.send_response(200)
-        self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.send_header('Content-Length', len(body))
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", len(body))
         self.end_headers()
         self.wfile.write(body)
 
@@ -1522,9 +1631,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _api_sessions(self, params):
         db = get_thread_db()
-        q = params.get('q', [''])[0].strip()
-        sort = params.get('sort', ['recent'])[0]
-        limit = int(params.get('limit', ['200'])[0])
+        q = params.get("q", [""])[0].strip()
+        sort = params.get("sort", ["recent"])[0]
+        limit = int(params.get("limit", ["200"])[0])
 
         sort_map = {
             "recent": "last_activity DESC",
@@ -1542,7 +1651,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                    FROM sessions
                    WHERE title LIKE ? OR session_id LIKE ? OR cwd LIKE ? OR model LIKE ?
                    ORDER BY {order} LIMIT ?""",
-                (f'%{q}%', f'%{q}%', f'%{q}%', f'%{q}%', limit)
+                (f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", limit),
             ).fetchall()
         else:
             rows = db.execute(
@@ -1550,33 +1659,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
                           total_input_tokens, total_output_tokens, total_turns,
                           jsonl_path, last_activity, title
                    FROM sessions ORDER BY {order} LIMIT ?""",
-                (limit,)
+                (limit,),
             ).fetchall()
         sessions = [dict(r) for r in rows]
 
         # Add source field to CLI sessions
         for s in sessions:
-            s['source'] = 'cli'
+            s["source"] = "cli"
 
         # Batch-fetch alert counts per session
-        session_ids = [s['session_id'] for s in sessions]
+        session_ids = [s["session_id"] for s in sessions]
         if session_ids:
-            placeholders = ','.join('?' * len(session_ids))
+            placeholders = ",".join("?" * len(session_ids))
             alert_rows = db.execute(
                 f"""SELECT session_id, COUNT(*) as cnt FROM events
                     WHERE event_type='sensitive_data' AND session_id IN ({placeholders})
                     GROUP BY session_id""",
-                session_ids
+                session_ids,
             ).fetchall()
-            alert_map = {r['session_id']: r['cnt'] for r in alert_rows}
+            alert_map = {r["session_id"]: r["cnt"] for r in alert_rows}
             for s in sessions:
-                s['alert_count'] = alert_map.get(s['session_id'], 0)
+                s["alert_count"] = alert_map.get(s["session_id"], 0)
 
         # Optionally include browser sessions
-        include_browser = params.get('include_browser', ['false'])[0].lower() == 'true'
-        source_filter = params.get('source', [''])[0].lower()
+        include_browser = params.get("include_browser", ["false"])[0].lower() == "true"
+        source_filter = params.get("source", [""])[0].lower()
 
-        if include_browser or source_filter in ('all', 'browser'):
+        if include_browser or source_filter in ("all", "browser"):
             browser_rows = db.execute(
                 """SELECT conversation_id, service,
                           MIN(visit_time) as start_time,
@@ -1597,37 +1706,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             for r in browser_rows:
                 rd = dict(r)
-                sessions.append({
-                    'session_id': 'browser_' + (rd['conversation_id'] or ''),
-                    'conversation_id': rd['conversation_id'],
-                    'source': 'browser',
-                    'start_time': rd['start_time'],
-                    'last_activity': rd['last_activity'],
-                    'title': rd['title'] or rd['service'],
-                    'model': rd['service'],
-                    'service': rd['service'],
-                    'cwd': '',
-                    'total_cost': 0,
-                    'total_input_tokens': 0,
-                    'total_output_tokens': 0,
-                    'total_turns': rd['total_turns'],
-                    'total_duration': rd['total_duration'],
-                    'alert_count': 0,
-                })
+                sessions.append(
+                    {
+                        "session_id": "browser_" + (rd["conversation_id"] or ""),
+                        "conversation_id": rd["conversation_id"],
+                        "source": "browser",
+                        "start_time": rd["start_time"],
+                        "last_activity": rd["last_activity"],
+                        "title": rd["title"] or rd["service"],
+                        "model": rd["service"],
+                        "service": rd["service"],
+                        "cwd": "",
+                        "total_cost": 0,
+                        "total_input_tokens": 0,
+                        "total_output_tokens": 0,
+                        "total_turns": rd["total_turns"],
+                        "total_duration": rd["total_duration"],
+                        "alert_count": 0,
+                    }
+                )
 
         # Filter by source if requested
-        if source_filter and source_filter not in ('all', ''):
-            sessions = [s for s in sessions if s.get('source') == source_filter]
+        if source_filter and source_filter not in ("all", ""):
+            sessions = [s for s in sessions if s.get("source") == source_filter]
 
         # Re-sort mixed list
-        if include_browser or source_filter == 'all':
-            sort_key = {'recent': 'last_activity', 'newest': 'start_time'}.get(sort, 'last_activity')
-            sessions.sort(key=lambda s: s.get(sort_key, '') or '', reverse=True)
+        if include_browser or source_filter == "all":
+            sort_key = {"recent": "last_activity", "newest": "start_time"}.get(sort, "last_activity")
+            sessions.sort(key=lambda s: s.get(sort_key, "") or "", reverse=True)
 
         self._send_json({"sessions": sessions})
 
     def _api_session_detail(self, params):
-        session_id = params.get('id', [''])[0]
+        session_id = params.get("id", [""])[0]
         if not session_id:
             self._send_json({"error": "missing session id"}, 400)
             return
@@ -1635,9 +1746,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         db = get_thread_db()
 
         # Get session info
-        session = db.execute(
-            "SELECT * FROM sessions WHERE session_id=?", (session_id,)
-        ).fetchone()
+        session = db.execute("SELECT * FROM sessions WHERE session_id=?", (session_id,)).fetchone()
         if not session:
             self._send_json({"error": "session not found"}, 404)
             return
@@ -1646,38 +1755,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
         events = db.execute(
             """SELECT id, timestamp, event_type, source_layer, data_json
                FROM events WHERE session_id=? ORDER BY id ASC""",
-            (session_id,)
+            (session_id,),
         ).fetchall()
 
         event_list = []
         for e in events:
             try:
-                data = json.loads(e['data_json'])
+                data = json.loads(e["data_json"])
             except (json.JSONDecodeError, TypeError):
                 data = {}
-            event_list.append({
-                "id": e['id'],
-                "timestamp": e['timestamp'],
-                "event_type": e['event_type'],
-                "source": e['source_layer'],
-                "data": data,
-            })
+            event_list.append(
+                {
+                    "id": e["id"],
+                    "timestamp": e["timestamp"],
+                    "event_type": e["event_type"],
+                    "source": e["source_layer"],
+                    "data": data,
+                }
+            )
 
-        self._send_json({
-            "session": dict(session),
-            "events": event_list,
-        })
+        self._send_json(
+            {
+                "session": dict(session),
+                "events": event_list,
+            }
+        )
 
     def _api_session_turns(self, params):
-        session_id = params.get('id', [''])[0]
+        session_id = params.get("id", [""])[0]
         if not session_id:
             self._send_json({"error": "missing session id"}, 400)
             return
 
         db = get_thread_db()
-        session = db.execute(
-            "SELECT * FROM sessions WHERE session_id=?", (session_id,)
-        ).fetchone()
+        session = db.execute("SELECT * FROM sessions WHERE session_id=?", (session_id,)).fetchone()
         if not session:
             self._send_json({"error": "not found"}, 404)
             return
@@ -1685,7 +1796,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         events = db.execute(
             """SELECT id, timestamp, event_type, source_layer, data_json
                FROM events WHERE session_id=? ORDER BY id ASC""",
-            (session_id,)
+            (session_id,),
         ).fetchall()
 
         turns = []
@@ -1696,20 +1807,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         for e in events:
             try:
-                data = json.loads(e['data_json']) if e['data_json'] else {}
+                data = json.loads(e["data_json"]) if e["data_json"] else {}
             except (json.JSONDecodeError, TypeError):
                 data = {}
-            evt = {"id": e['id'], "timestamp": e['timestamp'],
-                   "event_type": e['event_type'], "data": data}
+            evt = {"id": e["id"], "timestamp": e["timestamp"], "event_type": e["event_type"], "data": data}
 
-            if e['event_type'] == 'user_prompt':
+            if e["event_type"] == "user_prompt":
                 if current_turn:
                     turns.append(current_turn)
                 turn_num += 1
                 current_turn = {
                     "turn_number": turn_num,
-                    "timestamp": e['timestamp'],
-                    "prompt_preview": (data.get('text', '') or '')[:120],
+                    "timestamp": e["timestamp"],
+                    "prompt_preview": (data.get("text", "") or "")[:120],
                     "events": [evt],
                     "tools_used": [],
                     "has_alert": False,
@@ -1718,40 +1828,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 }
             elif current_turn:
                 current_turn["events"].append(evt)
-                if e['event_type'] == 'tool_use':
-                    current_turn["tools_used"].append(data.get('name', ''))
-                elif e['event_type'] == 'token_usage':
-                    inp = data.get('input_tokens', 0) or 0
-                    out = data.get('output_tokens', 0) or 0
+                if e["event_type"] == "tool_use":
+                    current_turn["tools_used"].append(data.get("name", ""))
+                elif e["event_type"] == "token_usage":
+                    inp = data.get("input_tokens", 0) or 0
+                    out = data.get("output_tokens", 0) or 0
                     current_turn["token_delta"] = {"input": inp, "output": out}
                     cumulative_input += inp
                     cumulative_output += out
-                    current_turn["cumulative_tokens"] = {
-                        "input": cumulative_input, "output": cumulative_output
-                    }
-                elif e['event_type'] == 'sensitive_data':
+                    current_turn["cumulative_tokens"] = {"input": cumulative_input, "output": cumulative_output}
+                elif e["event_type"] == "sensitive_data":
                     current_turn["has_alert"] = True
 
         if current_turn:
             turns.append(current_turn)
 
-        self._send_json({
-            "session": dict(session),
-            "turns": turns,
-            "total_turns": turn_num,
-            "total_input": cumulative_input,
-            "total_output": cumulative_output,
-        })
+        self._send_json(
+            {
+                "session": dict(session),
+                "turns": turns,
+                "total_turns": turn_num,
+                "total_input": cumulative_input,
+                "total_output": cumulative_output,
+            }
+        )
 
     def _api_feed(self, params):
-        since = params.get('since', [''])[0]
-        limit = int(params.get('limit', ['50'])[0])
+        since = params.get("since", [""])[0]
+        limit = int(params.get("limit", ["50"])[0])
 
         with live_feed_lock:
             items = list(live_feed)
 
         if since:
-            items = [i for i in items if i.get('timestamp', '') > since]
+            items = [i for i in items if i.get("timestamp", "") > since]
 
         items = items[-limit:]
         self._send_json({"events": items})
@@ -1764,18 +1874,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         total_cost = db.execute("SELECT COALESCE(SUM(total_cost), 0) FROM sessions").fetchone()[0]
         total_input = db.execute("SELECT COALESCE(SUM(total_input_tokens), 0) FROM sessions").fetchone()[0]
         total_output = db.execute("SELECT COALESCE(SUM(total_output_tokens), 0) FROM sessions").fetchone()[0]
-        total_alerts = db.execute(
-            "SELECT COUNT(*) FROM events WHERE event_type='sensitive_data'"
-        ).fetchone()[0]
+        total_alerts = db.execute("SELECT COUNT(*) FROM events WHERE event_type='sensitive_data'").fetchone()[0]
 
         # Active processes count
         active_procs = 0
         if psutil:
             try:
-                for proc in psutil.process_iter(['name', 'cmdline']):
+                for proc in psutil.process_iter(["name", "cmdline"]):
                     try:
-                        name = proc.info.get('name') or ''
-                        cmdline_str = ' '.join(proc.info.get('cmdline') or [])
+                        name = proc.info.get("name") or ""
+                        cmdline_str = " ".join(proc.info.get("cmdline") or [])
                         if is_ai_process(name, cmdline_str):
                             active_procs += 1
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -1840,23 +1948,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # Token forecast
         forecast = compute_forecast(db)
 
-        self._send_json({
-            "total_sessions": total_sessions,
-            "total_events": total_events,
-            "total_cost": round(total_cost, 4),
-            "total_input_tokens": total_input,
-            "total_output_tokens": total_output,
-            "total_alerts": total_alerts,
-            "active_processes": active_procs,
-            "token_timeline": [dict(r) for r in token_timeline],
-            "tool_counts": [dict(r) for r in tool_counts],
-            "model_usage": [dict(r) for r in model_usage],
-            "plan_info": plan_info,
-            "browser_today": browser_today,
-            "browser_total_duration": round(browser_total_duration, 0),
-            "browser_daily": browser_daily,
-            "forecast": forecast,
-        })
+        self._send_json(
+            {
+                "total_sessions": total_sessions,
+                "total_events": total_events,
+                "total_cost": round(total_cost, 4),
+                "total_input_tokens": total_input,
+                "total_output_tokens": total_output,
+                "total_alerts": total_alerts,
+                "active_processes": active_procs,
+                "token_timeline": [dict(r) for r in token_timeline],
+                "tool_counts": [dict(r) for r in tool_counts],
+                "model_usage": [dict(r) for r in model_usage],
+                "plan_info": plan_info,
+                "browser_today": browser_today,
+                "browser_total_duration": round(browser_total_duration, 0),
+                "browser_daily": browser_daily,
+                "forecast": forecast,
+            }
+        )
 
     def _api_processes(self, params):
         if not psutil:
@@ -1865,13 +1975,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         found = []
         try:
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline',
-                                              'cpu_percent', 'memory_percent',
-                                              'create_time', 'status']):
+            for proc in psutil.process_iter(
+                ["pid", "name", "cmdline", "cpu_percent", "memory_percent", "create_time", "status"]
+            ):
                 try:
                     info = proc.info
-                    name = info.get('name') or ''
-                    cmdline_str = ' '.join(info.get('cmdline') or [])
+                    name = info.get("name") or ""
+                    cmdline_str = " ".join(info.get("cmdline") or [])
                     try:
                         exe_path = proc.exe()
                     except (psutil.AccessDenied, psutil.NoSuchProcess):
@@ -1882,16 +1992,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         name_lower = name.lower()
                         if any(n in name_lower for n in ("cursor", "windsurf", "chatgpt")):
                             source_type = "Desktop App"
-                        found.append({
-                            "pid": info['pid'],
-                            "name": name,
-                            "cmdline": cmdline_str[:300],
-                            "source_type": source_type,
-                            "cpu_percent": info.get('cpu_percent', 0) or 0,
-                            "memory_percent": round(info.get('memory_percent', 0) or 0, 2),
-                            "status": info.get('status', ''),
-                            "uptime": _format_uptime(info.get('create_time', 0)),
-                        })
+                        found.append(
+                            {
+                                "pid": info["pid"],
+                                "name": name,
+                                "cmdline": cmdline_str[:300],
+                                "source_type": source_type,
+                                "cpu_percent": info.get("cpu_percent", 0) or 0,
+                                "memory_percent": round(info.get("memory_percent", 0) or 0, 2),
+                                "status": info.get("status", ""),
+                                "uptime": _format_uptime(info.get("create_time", 0)),
+                            }
+                        )
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
         except Exception:
@@ -1901,10 +2013,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _api_files(self, params):
         db = get_thread_db()
-        limit = int(params.get('limit', ['100'])[0])
+        limit = int(params.get("limit", ["100"])[0])
         rows = db.execute(
             """SELECT timestamp, path, operation, session_id, size
-               FROM file_events ORDER BY id DESC LIMIT ?""", (limit,)
+               FROM file_events ORDER BY id DESC LIMIT ?""",
+            (limit,),
         ).fetchall()
         self._send_json({"files": [dict(r) for r in rows]})
 
@@ -1918,10 +2031,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _api_alerts(self, params):
         db = get_thread_db()
-        limit = int(params.get('limit', ['200'])[0])
-        offset = int(params.get('offset', ['0'])[0])
-        severity_filter = params.get('severity', [''])[0]
-        category_filter = params.get('category', [''])[0]
+        limit = int(params.get("limit", ["200"])[0])
+        offset = int(params.get("offset", ["0"])[0])
+        severity_filter = params.get("severity", [""])[0]
+        category_filter = params.get("category", [""])[0]
         rows = db.execute(
             """SELECT e.id, e.timestamp, e.session_id, e.data_json,
                       s.title, s.cwd
@@ -1936,11 +2049,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         skipped = 0
         for r in rows:
             try:
-                data = json.loads(r['data_json'])
+                data = json.loads(r["data_json"])
             except (json.JSONDecodeError, TypeError):
                 data = {}
-            sev = data.get('severity', 'medium')
-            cats = data.get('categories', ['credential'])
+            sev = data.get("severity", "medium")
+            cats = data.get("categories", ["credential"])
             severity_counts[sev] = severity_counts.get(sev, 0) + 1
             for cat in cats:
                 category_counts[cat] = category_counts.get(cat, 0) + 1
@@ -1960,52 +2073,56 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             # Compute turn number for this alert
             turn_count = 0
-            if r['session_id']:
+            if r["session_id"]:
                 tc_row = db.execute(
                     """SELECT COUNT(*) FROM events
                        WHERE session_id=? AND event_type='user_prompt' AND id <= ?""",
-                    (r['session_id'], r['id'])
+                    (r["session_id"], r["id"]),
                 ).fetchone()
                 turn_count = tc_row[0] if tc_row else 0
 
-            alerts.append({
-                "id": r['id'],
-                "timestamp": r['timestamp'],
-                "session_id": r['session_id'],
-                "session_title": r['title'] or (r['session_id'] or '')[:8],
-                "cwd": r['cwd'],
-                "patterns": data.get('patterns', []),
-                "severity": sev,
-                "categories": cats,
-                "context": data.get('context', ''),
-                "snippet": data.get('snippet', ''),
-                "turn_number": turn_count,
-            })
-        self._send_json({
-            "alerts": alerts,
-            "severity_counts": severity_counts,
-            "category_counts": category_counts,
-            "total": sum(severity_counts.values()),
-            "has_more": len(alerts) >= limit,
-        })
+            alerts.append(
+                {
+                    "id": r["id"],
+                    "timestamp": r["timestamp"],
+                    "session_id": r["session_id"],
+                    "session_title": r["title"] or (r["session_id"] or "")[:8],
+                    "cwd": r["cwd"],
+                    "patterns": data.get("patterns", []),
+                    "severity": sev,
+                    "categories": cats,
+                    "context": data.get("context", ""),
+                    "snippet": data.get("snippet", ""),
+                    "turn_number": turn_count,
+                }
+            )
+        self._send_json(
+            {
+                "alerts": alerts,
+                "severity_counts": severity_counts,
+                "category_counts": category_counts,
+                "total": sum(severity_counts.values()),
+                "has_more": len(alerts) >= limit,
+            }
+        )
 
     def _api_browser(self, params):
         db = get_thread_db()
-        limit = int(params.get('limit', ['100'])[0])
+        limit = int(params.get("limit", ["100"])[0])
         rows = db.execute(
             """SELECT id, service, url, title, conversation_id, visit_time,
                       duration_seconds, foreground_seconds
                FROM browser_sessions ORDER BY id DESC LIMIT ?""",
-            (limit,)
+            (limit,),
         ).fetchall()
         self._send_json({"browser_sessions": [dict(r) for r in rows]})
 
     def _api_browser_sessions(self, params):
         """Browser visits grouped by conversation_id as logical sessions."""
         db = get_thread_db()
-        limit = int(params.get('limit', ['100'])[0])
-        service_filter = params.get('service', [''])[0]
-        q = params.get('q', [''])[0].strip()
+        limit = int(params.get("limit", ["100"])[0])
+        service_filter = params.get("service", [""])[0]
+        q = params.get("q", [""])[0].strip()
 
         conditions = ["conversation_id IS NOT NULL AND conversation_id != ''"]
         bind_vals = []
@@ -2014,7 +2131,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             bind_vals.append(service_filter)
         if q:
             conditions.append("(title LIKE ? OR url LIKE ? OR conversation_id LIKE ?)")
-            bind_vals.extend([f'%{q}%', f'%{q}%', f'%{q}%'])
+            bind_vals.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
 
         where = " AND ".join(conditions)
         bind_vals.append(limit)
@@ -2035,7 +2152,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 GROUP BY conversation_id
                 ORDER BY last_visit DESC
                 LIMIT ?""",
-            bind_vals
+            bind_vals,
         ).fetchall()
 
         sessions = [dict(r) for r in rows]
@@ -2047,14 +2164,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                ORDER BY visit_time DESC LIMIT 50"""
         ).fetchall()
 
-        self._send_json({
-            "browser_sessions": sessions,
-            "orphan_visits": [dict(r) for r in orphan_rows],
-        })
+        self._send_json(
+            {
+                "browser_sessions": sessions,
+                "orphan_visits": [dict(r) for r in orphan_rows],
+            }
+        )
 
     def _api_browser_session_detail(self, params):
         """All visits for a specific browser conversation with correlated connections."""
-        conv_id = params.get('conversation_id', [''])[0]
+        conv_id = params.get("conversation_id", [""])[0]
         if not conv_id:
             self._send_json({"error": "missing conversation_id"}, 400)
             return
@@ -2066,7 +2185,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                FROM browser_sessions
                WHERE conversation_id = ?
                ORDER BY visit_time ASC""",
-            (conv_id,)
+            (conv_id,),
         ).fetchall()
 
         if not rows:
@@ -2074,10 +2193,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         visits = [dict(r) for r in rows]
-        service = visits[0]['service']
-        first_visit = visits[0]['visit_time']
-        last_visit = visits[-1]['visit_time']
-        total_duration = sum(v.get('duration_seconds', 0) or 0 for v in visits)
+        service = visits[0]["service"]
+        first_visit = visits[0]["visit_time"]
+        last_visit = visits[-1]["visit_time"]
+        total_duration = sum(v.get("duration_seconds", 0) or 0 for v in visits)
 
         # Temporally correlated network connections
         service_hosts = {
@@ -2094,7 +2213,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         hosts = service_hosts.get(service, [])
         if hosts and first_visit and last_visit:
             host_conditions = " OR ".join(["remote_host LIKE ?"] * len(hosts))
-            host_binds = [f'%{h}%' for h in hosts]
+            host_binds = [f"%{h}%" for h in hosts]
             conn_rows = db.execute(
                 f"""SELECT timestamp, pid, process_name, remote_host, remote_port, service
                     FROM connections
@@ -2102,26 +2221,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
                       AND timestamp >= datetime(?, '-5 minutes')
                       AND timestamp <= datetime(?, '+5 minutes')
                     ORDER BY timestamp ASC LIMIT 100""",
-                host_binds + [first_visit, last_visit]
+                host_binds + [first_visit, last_visit],
             ).fetchall()
             correlated_connections = [dict(r) for r in conn_rows]
 
-        self._send_json({
-            "conversation_id": conv_id,
-            "service": service,
-            "title": next((v['title'] for v in reversed(visits)
-                           if v.get('title') and v['title'] != service), service),
-            "first_visit": first_visit,
-            "last_visit": last_visit,
-            "visit_count": len(visits),
-            "total_duration": total_duration,
-            "visits": visits,
-            "correlated_connections": correlated_connections,
-        })
+        self._send_json(
+            {
+                "conversation_id": conv_id,
+                "service": service,
+                "title": next(
+                    (v["title"] for v in reversed(visits) if v.get("title") and v["title"] != service), service
+                ),
+                "first_visit": first_visit,
+                "last_visit": last_visit,
+                "visit_count": len(visits),
+                "total_duration": total_duration,
+                "visits": visits,
+                "correlated_connections": correlated_connections,
+            }
+        )
 
     def _api_process_detail(self, params):
         """Process lifecycle and connection history for a specific PID."""
-        pid = int(params.get('pid', ['0'])[0])
+        pid = int(params.get("pid", ["0"])[0])
         if not pid:
             self._send_json({"error": "missing pid"}, 400)
             return
@@ -2135,40 +2257,42 @@ class DashboardHandler(BaseHTTPRequestHandler):
                FROM processes WHERE pid = ?
                GROUP BY pid, name, start_time
                ORDER BY start_time DESC""",
-            (pid,)
+            (pid,),
         ).fetchall()
 
         conn_rows = db.execute(
             """SELECT timestamp, remote_host, remote_port, status, service
                FROM connections WHERE pid = ?
                ORDER BY timestamp DESC LIMIT 200""",
-            (pid,)
+            (pid,),
         ).fetchall()
         connections = [dict(r) for r in conn_rows]
 
         service_counts = {}
         for c in connections:
-            svc = c.get('service', 'unknown')
+            svc = c.get("service", "unknown")
             service_counts[svc] = service_counts.get(svc, 0) + 1
 
-        self._send_json({
-            "pid": pid,
-            "processes": [dict(r) for r in proc_rows],
-            "connections": connections,
-            "service_breakdown": service_counts,
-        })
+        self._send_json(
+            {
+                "pid": pid,
+                "processes": [dict(r) for r in proc_rows],
+                "connections": connections,
+                "service_breakdown": service_counts,
+            }
+        )
 
     def _api_activity_timeline(self, params):
         """Unified timeline of all AI activity across sources."""
         db = get_thread_db()
-        limit = int(params.get('limit', ['100'])[0])
-        since = params.get('since', [''])[0]
-        source_filter = params.get('source', [''])[0]
+        limit = int(params.get("limit", ["100"])[0])
+        since = params.get("since", [""])[0]
+        source_filter = params.get("source", [""])[0]
 
         timeline = []
 
         # CLI session events
-        if not source_filter or source_filter == 'cli':
+        if not source_filter or source_filter == "cli":
             cli_conds = ["event_type IN ('user_prompt', 'assistant_response', 'sensitive_data')"]
             cli_binds = []
             if since:
@@ -2180,27 +2304,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
                            s.title, s.model
                     FROM events e
                     LEFT JOIN sessions s ON e.session_id = s.session_id
-                    WHERE {' AND '.join(cli_conds)}
+                    WHERE {" AND ".join(cli_conds)}
                     ORDER BY e.timestamp DESC LIMIT ?""",
-                cli_binds
+                cli_binds,
             ).fetchall()
             for r in cli_rows:
                 try:
-                    data = json.loads(r['data_json']) if r['data_json'] else {}
+                    data = json.loads(r["data_json"]) if r["data_json"] else {}
                 except (json.JSONDecodeError, TypeError):
                     data = {}
-                timeline.append({
-                    "timestamp": r['timestamp'],
-                    "source": "cli",
-                    "event_type": r['event_type'],
-                    "session_id": r['session_id'],
-                    "title": r['title'] or (r['session_id'] or '')[:8],
-                    "model": r['model'] or '',
-                    "summary": (data.get('text', '') or '')[:120],
-                })
+                timeline.append(
+                    {
+                        "timestamp": r["timestamp"],
+                        "source": "cli",
+                        "event_type": r["event_type"],
+                        "session_id": r["session_id"],
+                        "title": r["title"] or (r["session_id"] or "")[:8],
+                        "model": r["model"] or "",
+                        "summary": (data.get("text", "") or "")[:120],
+                    }
+                )
 
         # Browser visits
-        if not source_filter or source_filter == 'browser':
+        if not source_filter or source_filter == "browser":
             browser_conds = ["1=1"]
             browser_binds = []
             if since:
@@ -2210,26 +2336,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
             browser_rows = db.execute(
                 f"""SELECT visit_time, service, title, url, conversation_id, duration_seconds
                     FROM browser_sessions
-                    WHERE {' AND '.join(browser_conds)}
+                    WHERE {" AND ".join(browser_conds)}
                     ORDER BY visit_time DESC LIMIT ?""",
-                browser_binds
+                browser_binds,
             ).fetchall()
             for r in browser_rows:
                 rd = dict(r)
-                dur = int(rd.get('duration_seconds') or 0)
-                timeline.append({
-                    "timestamp": rd['visit_time'],
-                    "source": "browser",
-                    "event_type": "browser_visit",
-                    "session_id": 'browser_' + (rd['conversation_id'] or ''),
-                    "title": rd['title'] or rd['service'],
-                    "model": rd['service'],
-                    "summary": f"{rd['service']}: {(rd['title'] or '')[:80]}"
-                               + (f" ({dur}s)" if dur else ''),
-                })
+                dur = int(rd.get("duration_seconds") or 0)
+                timeline.append(
+                    {
+                        "timestamp": rd["visit_time"],
+                        "source": "browser",
+                        "event_type": "browser_visit",
+                        "session_id": "browser_" + (rd["conversation_id"] or ""),
+                        "title": rd["title"] or rd["service"],
+                        "model": rd["service"],
+                        "summary": f"{rd['service']}: {(rd['title'] or '')[:80]}" + (f" ({dur}s)" if dur else ""),
+                    }
+                )
 
         # Network connections
-        if not source_filter or source_filter == 'network':
+        if not source_filter or source_filter == "network":
             net_conds = ["1=1"]
             net_binds = []
             if since:
@@ -2239,23 +2366,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
             net_rows = db.execute(
                 f"""SELECT timestamp, pid, process_name, remote_host, remote_port, service
                     FROM connections
-                    WHERE {' AND '.join(net_conds)}
+                    WHERE {" AND ".join(net_conds)}
                     ORDER BY timestamp DESC LIMIT ?""",
-                net_binds
+                net_binds,
             ).fetchall()
             for r in net_rows:
                 rd = dict(r)
-                timeline.append({
-                    "timestamp": rd['timestamp'],
-                    "source": "network",
-                    "event_type": "connection",
-                    "session_id": None,
-                    "title": rd['process_name'],
-                    "model": '',
-                    "summary": f"{rd['process_name']} \u2192 {rd['remote_host']}:{rd['remote_port']} ({rd['service']})",
-                })
+                timeline.append(
+                    {
+                        "timestamp": rd["timestamp"],
+                        "source": "network",
+                        "event_type": "connection",
+                        "session_id": None,
+                        "title": rd["process_name"],
+                        "model": "",
+                        "summary": f"{rd['process_name']} \u2192 {rd['remote_host']}:{rd['remote_port']} ({rd['service']})",
+                    }
+                )
 
-        timeline.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+        timeline.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
         timeline = timeline[:limit]
 
         self._send_json({"timeline": timeline, "count": len(timeline)})
@@ -2265,48 +2394,48 @@ class DashboardHandler(BaseHTTPRequestHandler):
         lines = []
         for row in rows:
             lines.append(json.dumps(row, default=str))
-        body = ('\n'.join(lines) + '\n').encode('utf-8')
+        body = ("\n".join(lines) + "\n").encode("utf-8")
         self.send_response(200)
-        self.send_header('Content-Type', 'application/x-ndjson')
-        self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
-        self.send_header('Content-Length', len(body))
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", len(body))
         self.end_headers()
         self.wfile.write(body)
 
     def _send_json_download(self, data, filename):
         """Send JSON data with download headers."""
-        body = json.dumps(data, default=str, indent=2).encode('utf-8')
+        body = json.dumps(data, default=str, indent=2).encode("utf-8")
         self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
-        self.send_header('Content-Length', len(body))
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", len(body))
         self.end_headers()
         self.wfile.write(body)
 
     def _api_export(self, params):
         """Export data for SIEM integration."""
-        export_type = params.get('type', ['sessions'])[0]
-        fmt = params.get('format', ['json'])[0]
-        since = params.get('since', [''])[0]
-        until = params.get('until', [''])[0]
-        session_id = params.get('session_id', [''])[0]
-        event_types = params.get('event_type', [''])[0]
-        limit = int(params.get('limit', ['10000'])[0])
+        export_type = params.get("type", ["sessions"])[0]
+        fmt = params.get("format", ["json"])[0]
+        since = params.get("since", [""])[0]
+        until = params.get("until", [""])[0]
+        session_id = params.get("session_id", [""])[0]
+        event_types = params.get("event_type", [""])[0]
+        limit = int(params.get("limit", ["10000"])[0])
 
         db = get_thread_db()
 
-        if export_type == 'sessions':
+        if export_type == "sessions":
             rows = db.execute(
                 """SELECT session_id, start_time, cwd, model, total_cost,
                           total_input_tokens, total_output_tokens, total_turns,
                           last_activity, title
                    FROM sessions ORDER BY last_activity DESC LIMIT ?""",
-                (limit,)
+                (limit,),
             ).fetchall()
             data = [dict(r) for r in rows]
-            fname = f'ai_monitor_sessions_{now_iso()[:10]}'
+            fname = f"ai_monitor_sessions_{now_iso()[:10]}"
 
-        elif export_type == 'events':
+        elif export_type == "events":
             conditions = ["1=1"]
             bind_vals = []
             if since:
@@ -2319,8 +2448,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 conditions.append("session_id = ?")
                 bind_vals.append(session_id)
             if event_types:
-                types = event_types.split(',')
-                placeholders = ','.join('?' * len(types))
+                types = event_types.split(",")
+                placeholders = ",".join("?" * len(types))
                 conditions.append(f"event_type IN ({placeholders})")
                 bind_vals.extend(types)
             bind_vals.append(limit)
@@ -2328,21 +2457,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
             rows = db.execute(
                 f"""SELECT id, timestamp, session_id, event_type, source_layer, data_json
                    FROM events
-                   WHERE {' AND '.join(conditions)}
+                   WHERE {" AND ".join(conditions)}
                    ORDER BY id DESC LIMIT ?""",
-                bind_vals
+                bind_vals,
             ).fetchall()
             data = []
             for r in rows:
                 row = dict(r)
                 try:
-                    row['data'] = json.loads(row.pop('data_json', '{}'))
+                    row["data"] = json.loads(row.pop("data_json", "{}"))
                 except (json.JSONDecodeError, TypeError):
-                    row['data'] = {}
+                    row["data"] = {}
                 data.append(row)
-            fname = f'ai_monitor_events_{now_iso()[:10]}'
+            fname = f"ai_monitor_events_{now_iso()[:10]}"
 
-        elif export_type == 'alerts':
+        elif export_type == "alerts":
             rows = db.execute(
                 """SELECT e.id, e.timestamp, e.session_id, e.data_json,
                           s.title, s.cwd, s.model
@@ -2350,39 +2479,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
                    LEFT JOIN sessions s ON e.session_id = s.session_id
                    WHERE e.event_type='sensitive_data'
                    ORDER BY e.id DESC LIMIT ?""",
-                (limit,)
+                (limit,),
             ).fetchall()
             data = []
             for r in rows:
                 row = dict(r)
                 try:
-                    d = json.loads(row.pop('data_json', '{}'))
+                    d = json.loads(row.pop("data_json", "{}"))
                     row.update(d)
                 except (json.JSONDecodeError, TypeError):
                     pass
                 data.append(row)
-            fname = f'ai_monitor_alerts_{now_iso()[:10]}'
+            fname = f"ai_monitor_alerts_{now_iso()[:10]}"
 
-        elif export_type == 'connections':
+        elif export_type == "connections":
             rows = db.execute(
                 """SELECT timestamp, pid, process_name, remote_host,
                           remote_port, status, service
                    FROM connections ORDER BY id DESC LIMIT ?""",
-                (limit,)
+                (limit,),
             ).fetchall()
             data = [dict(r) for r in rows]
-            fname = f'ai_monitor_connections_{now_iso()[:10]}'
+            fname = f"ai_monitor_connections_{now_iso()[:10]}"
 
         else:
             self._send_json({"error": f"Unknown export type: {export_type}"}, 400)
             return
 
-        if fmt == 'ndjson':
-            self._send_ndjson(data, fname + '.ndjson')
+        if fmt == "ndjson":
+            self._send_ndjson(data, fname + ".ndjson")
         else:
-            self._send_json_download({"export_type": export_type, "count": len(data),
-                                       "exported_at": now_iso(), "data": data},
-                                      fname + '.json')
+            self._send_json_download(
+                {"export_type": export_type, "count": len(data), "exported_at": now_iso(), "data": data},
+                fname + ".json",
+            )
 
 
 def _format_uptime(create_time):
@@ -2394,9 +2524,9 @@ def _format_uptime(create_time):
         if elapsed < 60:
             return f"{int(elapsed)}s"
         elif elapsed < 3600:
-            return f"{int(elapsed/60)}m"
+            return f"{int(elapsed / 60)}m"
         else:
-            return f"{int(elapsed/3600)}h {int((elapsed%3600)/60)}m"
+            return f"{int(elapsed / 3600)}h {int((elapsed % 3600) / 60)}m"
     except Exception:
         return "unknown"
 
@@ -2410,9 +2540,11 @@ def _load_dashboard_html():
     """Load dashboard HTML from package data."""
     try:
         import importlib.resources
+
         return importlib.resources.files("claude_monitoring").joinpath("dashboard.html").read_text()
     except Exception:
         return "<html><body><h1>Dashboard HTML not found</h1></body></html>"
+
 
 DASHBOARD_HTML = _load_dashboard_html()
 
@@ -2420,6 +2552,7 @@ DASHBOARD_HTML = _load_dashboard_html()
 # ─────────────────────────────────────────────────────────────
 # SECTION 10: INITIAL JSONL BACKFILL
 # ─────────────────────────────────────────────────────────────
+
 
 def backfill_existing_sessions(watcher):
     """Scan existing JSONL files and backfill the database."""
@@ -2439,6 +2572,7 @@ def backfill_existing_sessions(watcher):
 # ─────────────────────────────────────────────────────────────
 # SECTION 11: MAIN ORCHESTRATOR
 # ─────────────────────────────────────────────────────────────
+
 
 def start_monitoring():
     """Start all monitoring layers and the web dashboard."""
@@ -2469,7 +2603,7 @@ def start_monitoring():
     if info["is_subscription"]:
         print(f"  Plan: {info.get('cost_label', 'Subscription')} (cost shown as usage)")
     else:
-        print(f"  Billing: API (cost shown in USD)")
+        print("  Billing: API (cost shown in USD)")
 
     # Layer 1a: JSONL Session Watcher
     jsonl_watcher = JSONLSessionWatcher()
@@ -2486,6 +2620,7 @@ def start_monitoring():
     def _backfill():
         n = backfill_existing_sessions(jsonl_watcher)
         print(f"  Backfill complete: {n} files processed")
+
     backfill_thread = threading.Thread(target=_backfill, daemon=True, name="Backfill")
     backfill_thread.start()
     print("  Backfilling existing sessions in background...")
@@ -2517,22 +2652,23 @@ def start_monitoring():
     proc_thread.start()
     net_thread.start()
     chrome_thread.start()
-    print(f"  Process scanner: active (every 2s)")
-    print(f"  Network monitor: active (every 5s)")
+    print("  Process scanner: active (every 2s)")
+    print("  Network monitor: active (every 5s)")
     chrome_profiles = chrome_watcher._find_history_files()
     if chrome_profiles:
         print(f"  Chrome AI watcher: active (every 60s, {len(chrome_profiles)} profile(s))")
     else:
-        print(f"  Chrome AI watcher: Chrome history not found")
+        print("  Chrome AI watcher: Chrome history not found")
 
     # Web Dashboard
     class ReusableHTTPServer(HTTPServer):
         allow_reuse_address = True
-    server = ReusableHTTPServer(('0.0.0.0', DASHBOARD_PORT), DashboardHandler)
+
+    server = ReusableHTTPServer(("0.0.0.0", DASHBOARD_PORT), DashboardHandler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True, name="Dashboard")
     server_thread.start()
     print(f"\n  Dashboard: http://localhost:{DASHBOARD_PORT}")
-    print(f"\n  Press Ctrl+C to stop")
+    print("\n  Press Ctrl+C to stop")
     print("=" * 62)
 
     # Initial process scan
@@ -2588,10 +2724,12 @@ def one_shot_scan():
     else:
         print(f"  Found {len(procs)} AI process(es):\n")
         for p in procs:
-            print(f"  PID {p['pid']:>6}  {p['name']:<20} "
-                  f"CPU:{p['cpu_percent']:>5.1f}%  MEM:{p['memory_percent']:>5.1f}%  "
-                  f"Status:{p['status']}")
-            if p.get('cmdline'):
+            print(
+                f"  PID {p['pid']:>6}  {p['name']:<20} "
+                f"CPU:{p['cpu_percent']:>5.1f}%  MEM:{p['memory_percent']:>5.1f}%  "
+                f"Status:{p['status']}"
+            )
+            if p.get("cmdline"):
                 print(f"           cmd: {p['cmdline'][:80]}")
     print()
 
@@ -2635,8 +2773,7 @@ def install_launch_agent():
     plist_path.write_text(plist_content)
     print(f"  Wrote: {plist_path}")
 
-    result = subprocess.run(["launchctl", "load", str(plist_path)],
-                            capture_output=True, text=True)
+    result = subprocess.run(["launchctl", "load", str(plist_path)], capture_output=True, text=True)
     if result.returncode == 0:
         print("  LaunchAgent loaded successfully!")
         print(f"  Log: {log_path}")
@@ -2653,8 +2790,7 @@ def uninstall_launch_agent():
         print("  LaunchAgent not found. Nothing to uninstall.")
         return
 
-    subprocess.run(["launchctl", "unload", str(plist_path)],
-                    capture_output=True, text=True)
+    subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True, text=True)
     plist_path.unlink()
     print("  LaunchAgent unloaded and removed.")
 
@@ -2663,25 +2799,21 @@ def uninstall_launch_agent():
 # SECTION 12: CLI ENTRYPOINT
 # ─────────────────────────────────────────────────────────────
 
+
 def _update_port(port):
     global DASHBOARD_PORT
     DASHBOARD_PORT = port
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="AI Runtime Monitor — Full visibility into AI agent activity"
+    parser = argparse.ArgumentParser(description="AI Runtime Monitor — Full visibility into AI agent activity")
+    parser.add_argument("--start", action="store_true", help="Start monitoring and dashboard")
+    parser.add_argument("--scan", action="store_true", help="One-shot process scan")
+    parser.add_argument(
+        "--install-agent", action="store_true", help="Install as macOS LaunchAgent (auto-start on login)"
     )
-    parser.add_argument("--start", action="store_true",
-                        help="Start monitoring and dashboard")
-    parser.add_argument("--scan", action="store_true",
-                        help="One-shot process scan")
-    parser.add_argument("--install-agent", action="store_true",
-                        help="Install as macOS LaunchAgent (auto-start on login)")
-    parser.add_argument("--uninstall-agent", action="store_true",
-                        help="Remove macOS LaunchAgent")
-    parser.add_argument("--port", type=int, default=DASHBOARD_PORT,
-                        help=f"Dashboard port (default: {DASHBOARD_PORT})")
+    parser.add_argument("--uninstall-agent", action="store_true", help="Remove macOS LaunchAgent")
+    parser.add_argument("--port", type=int, default=DASHBOARD_PORT, help=f"Dashboard port (default: {DASHBOARD_PORT})")
 
     args = parser.parse_args()
 

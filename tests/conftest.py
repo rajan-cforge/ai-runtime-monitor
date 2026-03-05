@@ -18,9 +18,9 @@ def tmp_db(tmp_path):
     output_dir = tmp_path / "output"
     output_dir.mkdir()
 
-    with patch("claude_monitoring.monitor.DB_PATH", db_path), \
-         patch("claude_monitoring.monitor.OUTPUT_DIR", output_dir):
+    with patch("claude_monitoring.monitor.DB_PATH", db_path), patch("claude_monitoring.monitor.OUTPUT_DIR", output_dir):
         from claude_monitoring.monitor import init_db
+
         conn = init_db()
         yield conn
         conn.close()

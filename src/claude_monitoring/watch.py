@@ -26,21 +26,20 @@ HOW IT WORKS:
   Writes one CSV row per API turn.
 """
 
-import sys
-import os
-import subprocess
-import json
-import re
+import argparse
 import csv
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
 import time
 import uuid
-import hashlib
-import argparse
-import signal
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from collections import defaultdict
-from typing import Optional, List, Dict, Tuple
+from typing import Optional
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -53,139 +52,151 @@ PROXY_PORT = 9080
 
 AI_HOSTS = {
     # Anthropic
-    "api.anthropic.com":    "anthropic_api",
+    "api.anthropic.com": "anthropic_api",
     "statsig.anthropic.com": "anthropic_telemetry",
     "console.anthropic.com": "anthropic_console",
     # OpenAI / ChatGPT / Copilot
-    "api.openai.com":       "openai_api",
-    "chatgpt.com":          "chatgpt_web",
+    "api.openai.com": "openai_api",
+    "chatgpt.com": "chatgpt_web",
     "copilot.githubusercontent.com": "github_copilot",
     "copilot-proxy.githubusercontent.com": "github_copilot",
-    "githubcopilot.com":    "github_copilot",
-    "api.githubcopilot.com":"github_copilot",
+    "githubcopilot.com": "github_copilot",
+    "api.githubcopilot.com": "github_copilot",
     # Google
     "generativelanguage.googleapis.com": "gemini_api",
-    "aistudio.google.com":  "google_aistudio",
+    "aistudio.google.com": "google_aistudio",
     "aiplatform.googleapis.com": "vertex_ai",
     # AWS
-    "bedrock.amazonaws.com":"aws_bedrock",
+    "bedrock.amazonaws.com": "aws_bedrock",
     "bedrock-runtime.amazonaws.com": "aws_bedrock",
     # Mistral
-    "api.mistral.ai":       "mistral_api",
+    "api.mistral.ai": "mistral_api",
     # Cohere
-    "api.cohere.ai":        "cohere_api",
-    "api.cohere.com":       "cohere_api",
+    "api.cohere.ai": "cohere_api",
+    "api.cohere.com": "cohere_api",
     # Groq
-    "api.groq.com":         "groq_api",
+    "api.groq.com": "groq_api",
     # Together AI
-    "api.together.xyz":     "together_api",
+    "api.together.xyz": "together_api",
     # Perplexity
-    "api.perplexity.ai":    "perplexity_api",
+    "api.perplexity.ai": "perplexity_api",
     # DeepSeek
-    "api.deepseek.com":     "deepseek_api",
+    "api.deepseek.com": "deepseek_api",
     # xAI / Grok
-    "api.x.ai":             "xai_grok_api",
+    "api.x.ai": "xai_grok_api",
     # HuggingFace
     "api-inference.huggingface.co": "huggingface_api",
-    "huggingface.co":       "huggingface_web",
+    "huggingface.co": "huggingface_web",
     # Replicate
-    "api.replicate.com":    "replicate_api",
+    "api.replicate.com": "replicate_api",
     # Fireworks
-    "api.fireworks.ai":     "fireworks_api",
+    "api.fireworks.ai": "fireworks_api",
     # Ollama (local)
-    "localhost:11434":      "ollama_local",
-    "127.0.0.1:11434":      "ollama_local",
+    "localhost:11434": "ollama_local",
+    "127.0.0.1:11434": "ollama_local",
     # LM Studio (local)
-    "localhost:1234":       "lmstudio_local",
-    "127.0.0.1:1234":       "lmstudio_local",
+    "localhost:1234": "lmstudio_local",
+    "127.0.0.1:1234": "lmstudio_local",
     # OpenRouter
-    "openrouter.ai":        "openrouter_api",
+    "openrouter.ai": "openrouter_api",
     # Azure OpenAI
-    "openai.azure.com":     "azure_openai",
+    "openai.azure.com": "azure_openai",
     # Telemetry / analytics
-    "sentry.io":            "error_reporting",
-    "ingest.sentry.io":     "error_reporting",
-    "featuregates.cloud":   "statsig_telemetry",
-    "api.statsig.com":      "statsig_telemetry",
-    "events.statsig.com":   "statsig_telemetry",
-    "api.segment.io":       "segment_telemetry",
-    "api.amplitude.com":    "amplitude_telemetry",
+    "sentry.io": "error_reporting",
+    "ingest.sentry.io": "error_reporting",
+    "featuregates.cloud": "statsig_telemetry",
+    "api.statsig.com": "statsig_telemetry",
+    "events.statsig.com": "statsig_telemetry",
+    "api.segment.io": "segment_telemetry",
+    "api.amplitude.com": "amplitude_telemetry",
 }
 
 # Sensitive data patterns to flag before data leaves your machine
 SENSITIVE_PATTERNS = {
-    "aws_key":          r"(?:AKIA|ASIA|AROA|AIDA)[A-Z0-9]{16}",
-    "aws_secret":       r"(?i)aws.{0,20}secret.{0,20}['\"][A-Za-z0-9/+=]{40}['\"]",
-    "private_key":      r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
-    "github_token":     r"gh[pousr]_[A-Za-z0-9_]{36,}",
-    "api_key_generic":  r"(?i)(?:api[_-]?key|apikey|api[_-]?secret)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{20,}",
+    "aws_key": r"(?:AKIA|ASIA|AROA|AIDA)[A-Z0-9]{16}",
+    "aws_secret": r"(?i)aws.{0,20}secret.{0,20}['\"][A-Za-z0-9/+=]{40}['\"]",
+    "private_key": r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+    "github_token": r"gh[pousr]_[A-Za-z0-9_]{36,}",
+    "api_key_generic": r"(?i)(?:api[_-]?key|apikey|api[_-]?secret)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{20,}",
     "password_in_code": r"(?i)(?:password|passwd|pwd)\s*[:=]\s*['\"][^'\"]{6,}['\"]",
-    "jwt_token":        r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
-    "credit_card":      r"\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\b",
-    "ssn":              r"\b\d{3}-\d{2}-\d{4}\b",
-    "anthropic_key":    r"sk-ant-[A-Za-z0-9\-_]{40,}",
-    "env_file":         r"\.env(?:\.[a-z]+)?",
-    "ip_address":       r"\b(?:10\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.)\d{1,3}\.\d{1,3}\b",
+    "jwt_token": r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
+    "credit_card": r"\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\b",
+    "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
+    "anthropic_key": r"sk-ant-[A-Za-z0-9\-_]{40,}",
+    "env_file": r"\.env(?:\.[a-z]+)?",
+    "ip_address": r"\b(?:10\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.)\d{1,3}\.\d{1,3}\b",
 }
 
 # Claude Code tool names to track
 TOOL_NAMES = {
-    "bash", "computer", "str_replace_editor", "str_replace_based_edit_tool",
-    "read_file", "write_file", "create_file", "list_directory",
-    "web_search", "web_fetch", "execute_code", "file_editor",
-    "TodoRead", "TodoWrite", "Task", "mcp__",
+    "bash",
+    "computer",
+    "str_replace_editor",
+    "str_replace_based_edit_tool",
+    "read_file",
+    "write_file",
+    "create_file",
+    "list_directory",
+    "web_search",
+    "web_fetch",
+    "execute_code",
+    "file_editor",
+    "TodoRead",
+    "TodoWrite",
+    "Task",
+    "mcp__",
 }
 
 # Pricing per 1M tokens (Claude models, approximate)
 MODEL_PRICING = {
-    "claude-opus-4":        {"input": 15.00,  "output": 75.00},
-    "claude-sonnet-4":      {"input": 3.00,   "output": 15.00},
-    "claude-haiku-4":       {"input": 0.80,   "output": 4.00},
-    "claude-opus-4-5":      {"input": 15.00,  "output": 75.00},
-    "claude-sonnet-4-5":    {"input": 3.00,   "output": 15.00},
-    "claude-haiku-4-5":     {"input": 0.80,   "output": 4.00},
-    "claude-3-5-sonnet":    {"input": 3.00,   "output": 15.00},
-    "claude-3-5-haiku":     {"input": 0.80,   "output": 4.00},
-    "claude-3-opus":        {"input": 15.00,  "output": 75.00},
-    "default":              {"input": 3.00,   "output": 15.00},
+    "claude-opus-4": {"input": 15.00, "output": 75.00},
+    "claude-sonnet-4": {"input": 3.00, "output": 15.00},
+    "claude-haiku-4": {"input": 0.80, "output": 4.00},
+    "claude-opus-4-5": {"input": 15.00, "output": 75.00},
+    "claude-sonnet-4-5": {"input": 3.00, "output": 15.00},
+    "claude-haiku-4-5": {"input": 0.80, "output": 4.00},
+    "claude-3-5-sonnet": {"input": 3.00, "output": 15.00},
+    "claude-3-5-haiku": {"input": 0.80, "output": 4.00},
+    "claude-3-opus": {"input": 15.00, "output": 75.00},
+    "default": {"input": 3.00, "output": 15.00},
 }
 
 CSV_COLUMNS = [
-    "timestamp",            # ISO 8601
-    "session_id",           # UUID per mitmproxy launch
-    "turn_id",              # UUID per request/response pair
-    "turn_number",          # Sequential int
-    "destination_host",     # e.g. api.anthropic.com
+    "timestamp",  # ISO 8601
+    "session_id",  # UUID per mitmproxy launch
+    "turn_id",  # UUID per request/response pair
+    "turn_number",  # Sequential int
+    "destination_host",  # e.g. api.anthropic.com
     "destination_service",  # e.g. anthropic_api
-    "endpoint_path",        # e.g. /v1/messages
-    "http_method",          # GET/POST
-    "http_status",          # 200, 429, etc.
-    "model",                # claude-sonnet-4-5 etc.
-    "stream",               # true/false
-    "input_tokens",         # from usage block
-    "output_tokens",        # from usage block
-    "cache_read_tokens",    # cache hits
-    "cache_write_tokens",   # cache writes
-    "estimated_cost_usd",   # computed from token counts
-    "request_size_bytes",   # raw request body size
+    "endpoint_path",  # e.g. /v1/messages
+    "http_method",  # GET/POST
+    "http_status",  # 200, 429, etc.
+    "model",  # claude-sonnet-4-5 etc.
+    "stream",  # true/false
+    "input_tokens",  # from usage block
+    "output_tokens",  # from usage block
+    "cache_read_tokens",  # cache hits
+    "cache_write_tokens",  # cache writes
+    "estimated_cost_usd",  # computed from token counts
+    "request_size_bytes",  # raw request body size
     "response_size_bytes",  # raw response body size
-    "latency_ms",           # time from request to full response
-    "num_messages",         # messages[] length in request
+    "latency_ms",  # time from request to full response
+    "num_messages",  # messages[] length in request
     "system_prompt_chars",  # length of system prompt
-    "last_user_msg_preview",# first 300 chars of last user message
-    "assistant_msg_preview",# first 300 chars of assistant response
-    "tool_calls",           # JSON array of tool names invoked
-    "tool_call_count",      # int
-    "bash_commands",        # JSON array of bash commands run
-    "files_read",           # JSON array of file paths read
-    "files_written",        # JSON array of file paths written
-    "urls_fetched",         # JSON array of URLs fetched by agent
-    "sensitive_patterns",   # comma-separated pattern names detected
-    "sensitive_pattern_count", # int
-    "content_types_sent",   # text/image/tool_result etc
-    "stop_reason",          # end_turn / tool_use / max_tokens
-    "request_id",           # x-request-id header from Anthropic
-    "raw_request_hash",     # sha256 of request body (for dedup)
+    "last_user_msg_preview",  # first 300 chars of last user message
+    "assistant_msg_preview",  # first 300 chars of assistant response
+    "tool_calls",  # JSON array of tool names invoked
+    "tool_call_count",  # int
+    "bash_commands",  # JSON array of bash commands run
+    "files_read",  # JSON array of file paths read
+    "files_written",  # JSON array of file paths written
+    "urls_fetched",  # JSON array of URLs fetched by agent
+    "sensitive_patterns",  # comma-separated pattern names detected
+    "sensitive_pattern_count",  # int
+    "content_types_sent",  # text/image/tool_result etc
+    "stop_reason",  # end_turn / tool_use / max_tokens
+    "request_id",  # x-request-id header from Anthropic
+    "raw_request_hash",  # sha256 of request body (for dedup)
 ]
 
 
@@ -193,7 +204,8 @@ CSV_COLUMNS = [
 # UTILITY FUNCTIONS
 # ─────────────────────────────────────────────
 
-def scan_sensitive(text: str) -> List[str]:
+
+def scan_sensitive(text: str) -> list[str]:
     """Return list of sensitive pattern names found in text."""
     found = []
     for name, pattern in SENSITIVE_PATTERNS.items():
@@ -202,19 +214,20 @@ def scan_sensitive(text: str) -> List[str]:
     return found
 
 
-def extract_file_paths(text: str) -> List[str]:
+def extract_file_paths(text: str) -> list[str]:
     """Extract file paths mentioned in text."""
     paths = re.findall(r'(?:^|[\s\'"])(/(?:[\w\-./]+))', text)
-    return list(set(p for p in paths if len(p) > 3 and '.' in p.split('/')[-1]))
+    return list(set(p for p in paths if len(p) > 3 and "." in p.split("/")[-1]))
 
 
-def extract_urls(text: str) -> List[str]:
+def extract_urls(text: str) -> list[str]:
     """Extract HTTP/HTTPS URLs from text."""
     return re.findall(r'https?://[^\s\'"<>]+', text)
 
 
-def estimate_cost(model: str, input_tokens: int, output_tokens: int,
-                  cache_read: int = 0, cache_write: int = 0) -> float:
+def estimate_cost(
+    model: str, input_tokens: int, output_tokens: int, cache_read: int = 0, cache_write: int = 0
+) -> float:
     """Estimate USD cost from token counts."""
     pricing = MODEL_PRICING["default"]
     # Match longest key first to avoid e.g. "claude-opus-4" matching before "claude-opus-4-5"
@@ -222,10 +235,12 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int,
         if key != "default" and key in model:
             pricing = MODEL_PRICING[key]
             break
-    cost = (input_tokens / 1_000_000 * pricing["input"] +
-            output_tokens / 1_000_000 * pricing["output"] +
-            cache_read / 1_000_000 * pricing["input"] * 0.1 +
-            cache_write / 1_000_000 * pricing["input"] * 1.25)
+    cost = (
+        input_tokens / 1_000_000 * pricing["input"]
+        + output_tokens / 1_000_000 * pricing["output"]
+        + cache_read / 1_000_000 * pricing["input"] * 0.1
+        + cache_write / 1_000_000 * pricing["input"] * 1.25
+    )
     return round(cost, 6)
 
 
@@ -241,7 +256,6 @@ def get_csv_path() -> Path:
 
 try:
     from mitmproxy import http as mhttp
-    from mitmproxy import ctx
 
     class ClaudeWatchAddon:
         """
@@ -251,13 +265,13 @@ try:
         def __init__(self):
             self.session_id = str(uuid.uuid4())[:8]
             self.turn_counter = 0
-            self.pending: Dict[int, dict] = {}  # flow.id -> metadata
+            self.pending: dict[int, dict] = {}  # flow.id -> metadata
             self.csv_path = get_csv_path()
             self._init_csv()
             self._print_banner()
 
         def _init_csv(self):
-            with open(self.csv_path, 'w', newline='', encoding='utf-8') as f:
+            with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
                 writer.writeheader()
             print(f"\n📄 Writing to: {self.csv_path}\n")
@@ -329,8 +343,7 @@ try:
                 try:
                     body = json.loads(flow.request.content)
                     record = self._parse_request_body(body, record)
-                    record["raw_request_hash"] = hashlib.sha256(
-                        flow.request.content).hexdigest()[:12]
+                    record["raw_request_hash"] = hashlib.sha256(flow.request.content).hexdigest()[:12]
                 except Exception:
                     pass
 
@@ -373,8 +386,7 @@ try:
             # System prompt length
             system = body.get("system", "")
             if isinstance(system, list):
-                system = " ".join(
-                    b.get("text", "") for b in system if isinstance(b, dict))
+                system = " ".join(b.get("text", "") for b in system if isinstance(b, dict))
             record["system_prompt_chars"] = len(system)
 
             # Scan full request for sensitive patterns
@@ -416,8 +428,7 @@ try:
                                     bash_cmds.append(cmd[:200])
 
                             # File path extraction
-                            if name in ("str_replace_editor", "write_file",
-                                        "create_file", "file_editor"):
+                            if name in ("str_replace_editor", "write_file", "create_file", "file_editor"):
                                 fp = inp.get("path", inp.get("file_path", ""))
                                 if fp:
                                     files_written.append(fp)
@@ -444,8 +455,7 @@ try:
                             if role == "user":
                                 last_user_text = block.get("text", "")
 
-            record["last_user_msg_preview"] = last_user_text[:300].replace(
-                "\n", " ").replace(",", ";")
+            record["last_user_msg_preview"] = last_user_text[:300].replace("\n", " ").replace(",", ";")
             record["tool_calls"] = json.dumps(list(set(tool_calls)))
             record["tool_call_count"] = len(tool_calls)
             record["bash_commands"] = json.dumps(bash_cmds[:10])
@@ -467,8 +477,11 @@ try:
 
             record["estimated_cost_usd"] = estimate_cost(
                 record["model"],
-                record["input_tokens"], record["output_tokens"],
-                record["cache_read_tokens"], record["cache_write_tokens"])
+                record["input_tokens"],
+                record["output_tokens"],
+                record["cache_read_tokens"],
+                record["cache_write_tokens"],
+            )
 
             # Extract assistant text preview
             content = body.get("content", [])
@@ -480,15 +493,12 @@ try:
                     elif block.get("type") == "tool_use":
                         tool_calls.append(block.get("name", ""))
 
-            record["assistant_msg_preview"] = " ".join(text_parts)[:300].replace(
-                "\n", " ").replace(",", ";")
+            record["assistant_msg_preview"] = " ".join(text_parts)[:300].replace("\n", " ").replace(",", ";")
 
             if tool_calls:
                 existing = json.loads(record.get("tool_calls", "[]"))
-                record["tool_calls"] = json.dumps(
-                    list(set(existing + tool_calls)))
-                record["tool_call_count"] = len(
-                    json.loads(record["tool_calls"]))
+                record["tool_calls"] = json.dumps(list(set(existing + tool_calls)))
+                record["tool_call_count"] = len(json.loads(record["tool_calls"]))
 
             return record
 
@@ -529,8 +539,7 @@ try:
                     elif etype == "message_delta":
                         usage = event.get("usage", {})
                         output_tok += usage.get("output_tokens", 0)
-                        stop_reason = event.get("delta", {}).get(
-                            "stop_reason", "")
+                        stop_reason = event.get("delta", {}).get("stop_reason", "")
 
                     elif etype == "message_stop":
                         pass
@@ -546,25 +555,23 @@ try:
             record["stream"] = "true"
 
             record["estimated_cost_usd"] = estimate_cost(
-                record["model"], input_tok, output_tok, cache_read, cache_write)
+                record["model"], input_tok, output_tok, cache_read, cache_write
+            )
 
             if text_chunks:
-                record["assistant_msg_preview"] = "".join(
-                    text_chunks)[:300].replace("\n", " ").replace(",", ";")
+                record["assistant_msg_preview"] = "".join(text_chunks)[:300].replace("\n", " ").replace(",", ";")
 
             if tool_calls:
                 existing = json.loads(record.get("tool_calls", "[]"))
-                record["tool_calls"] = json.dumps(
-                    list(set(existing + tool_calls)))
-                record["tool_call_count"] = len(
-                    json.loads(record["tool_calls"]))
+                record["tool_calls"] = json.dumps(list(set(existing + tool_calls)))
+                record["tool_call_count"] = len(json.loads(record["tool_calls"]))
 
             return record
 
         def _write_row(self, record: dict):
             # Remove any internal keys
             row = {k: record.get(k, "") for k in CSV_COLUMNS}
-            with open(self.csv_path, 'a', newline='', encoding='utf-8') as f:
+            with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
                 writer.writerow(row)
 
@@ -588,10 +595,13 @@ try:
             else:
                 model_short = "?"
 
-            print(f"  {icon} [{turn:03d}] {svc:<22} {status}  "
-                  f"{model_short:<8}  "
-                  f"↑{in_tok:>5}t ↓{out_tok:>5}t  "
-                  f"${cost:.4f}  {latency:>5}ms", end="")
+            print(
+                f"  {icon} [{turn:03d}] {svc:<22} {status}  "
+                f"{model_short:<8}  "
+                f"↑{in_tok:>5}t ↓{out_tok:>5}t  "
+                f"${cost:.4f}  {latency:>5}ms",
+                end="",
+            )
 
             if tools:
                 print(f"  tools={tools[:3]}", end="")
@@ -600,9 +610,20 @@ try:
             print()
 
     # Only instantiate addon when loaded by mitmdump (not CLI mode)
-    if not any(x in sys.argv for x in
-               ["--setup", "--start", "--analyze", "--plot", "--dashboard",
-                "--scan", "--generate-test", "--help", "-h"]):
+    if not any(
+        x in sys.argv
+        for x in [
+            "--setup",
+            "--start",
+            "--analyze",
+            "--plot",
+            "--dashboard",
+            "--scan",
+            "--generate-test",
+            "--help",
+            "-h",
+        ]
+    ):
         addons = [ClaudeWatchAddon()]
 
 except ImportError:
@@ -612,6 +633,7 @@ except ImportError:
 # ─────────────────────────────────────────────
 # SETUP & LAUNCH CLI
 # ─────────────────────────────────────────────
+
 
 def run_setup():
     """Install mitmproxy and trust its CA certificate."""
@@ -623,13 +645,14 @@ def run_setup():
     for idx, pkg in enumerate(packages, 1):
         print(f"\n[{idx}/4] Installing {pkg}...")
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--upgrade",
-             pkg, "--break-system-packages"],
-            capture_output=True, text=True)
+            [sys.executable, "-m", "pip", "install", "--upgrade", pkg, "--break-system-packages"],
+            capture_output=True,
+            text=True,
+        )
         if result.returncode != 0:
             result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--upgrade", pkg],
-                capture_output=True, text=True)
+                [sys.executable, "-m", "pip", "install", "--upgrade", pkg], capture_output=True, text=True
+            )
 
         if result.returncode == 0:
             print(f"   ✅ {pkg} installed")
@@ -642,8 +665,8 @@ def run_setup():
     cert_dir = Path.home() / ".mitmproxy"
     if not (cert_dir / "mitmproxy-ca-cert.pem").exists():
         proc = subprocess.Popen(
-            ["mitmdump", "--listen-port", "18080", "-q"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            ["mitmdump", "--listen-port", "18080", "-q"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
         time.sleep(3)
         proc.terminate()
         proc.wait()
@@ -657,24 +680,34 @@ def run_setup():
     # Trust cert on macOS
     print("\n[4/4] Trusting CA certificate (requires sudo)...")
     import platform
+
     if platform.system() == "Darwin":
         if cert_path.exists():
-            result = subprocess.run([
-                "sudo", "security", "add-trusted-cert",
-                "-d", "-r", "trustRoot",
-                "-k", "/Library/Keychains/System.keychain",
-                str(cert_path)
-            ], capture_output=True, text=True)
+            result = subprocess.run(
+                [
+                    "sudo",
+                    "security",
+                    "add-trusted-cert",
+                    "-d",
+                    "-r",
+                    "trustRoot",
+                    "-k",
+                    "/Library/Keychains/System.keychain",
+                    str(cert_path),
+                ],
+                capture_output=True,
+                text=True,
+            )
             if result.returncode == 0:
                 print("   ✅ Certificate trusted in macOS System Keychain")
             else:
-                print(f"   ⚠️  Auto-trust failed. Manual steps:")
-                print(f"       sudo security add-trusted-cert -d -r trustRoot \\")
-                print(f"         -k /Library/Keychains/System.keychain \\")
+                print("   ⚠️  Auto-trust failed. Manual steps:")
+                print("       sudo security add-trusted-cert -d -r trustRoot \\")
+                print("         -k /Library/Keychains/System.keychain \\")
                 print(f"         {cert_path}")
         else:
-            print(f"   ⚠️  Run `mitmdump --listen-port 18080` briefly first to generate cert,")
-            print(f"       then re-run setup.")
+            print("   ⚠️  Run `mitmdump --listen-port 18080` briefly first to generate cert,")
+            print("       then re-run setup.")
     elif platform.system() == "Linux":
         print("   📋 Linux: Copy cert to /usr/local/share/ca-certificates/ and run update-ca-certificates")
     else:
@@ -684,15 +717,15 @@ def run_setup():
     print("\n" + "=" * 50)
     print("✅ Setup complete!\n")
     print("📡 TO START MONITORING:")
-    print(f"   claude-watch --start\n")
+    print("   claude-watch --start\n")
     print("📁 Captures saved to:")
     print(f"   {SESSION_DIR}\n")
     print("📊 TO ANALYZE / VISUALIZE:")
-    print(f"   claude-watch --analyze        # terminal summary")
-    print(f"   claude-watch --plot            # matplotlib PNG dashboard")
-    print(f"   claude-watch --dashboard       # live web dashboard")
-    print(f"   claude-watch --scan            # detect AI processes")
-    print(f"   claude-watch --generate-test   # create test data\n")
+    print("   claude-watch --analyze        # terminal summary")
+    print("   claude-watch --plot            # matplotlib PNG dashboard")
+    print("   claude-watch --dashboard       # live web dashboard")
+    print("   claude-watch --scan            # detect AI processes")
+    print("   claude-watch --generate-test   # create test data\n")
 
 
 def run_start():
@@ -721,18 +754,21 @@ echo "   Run: claude"
     print("\n🔭 Claude Watch")
     print("=" * 50)
     print(f"\n📡 Starting proxy on port {PROXY_PORT}...")
-    print(f"\n🖥️  In ANOTHER terminal, run:")
+    print("\n🖥️  In ANOTHER terminal, run:")
     print(f"   source {env_file}")
-    print(f"   claude\n")
+    print("   claude\n")
     print("=" * 50 + "\n")
 
     # Launch mitmdump with this script as addon
     cmd = [
         "mitmdump",
-        "--listen-port", str(PROXY_PORT),
+        "--listen-port",
+        str(PROXY_PORT),
         "--ssl-insecure",
-        "-s", str(script_path),
-        "--set", "flow_detail=0",
+        "-s",
+        str(script_path),
+        "--set",
+        "flow_detail=0",
         "--quiet",
     ]
 
@@ -756,7 +792,7 @@ def run_analyze(sessions_dir: Optional[str] = None):
     print(f"\n📊 Analyzing: {latest.name}\n")
 
     rows = []
-    with open(latest, newline='', encoding='utf-8') as f:
+    with open(latest, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
 
@@ -791,8 +827,8 @@ def run_analyze(sessions_dir: Optional[str] = None):
     print(f"  Input tokens               : {total_in_tok:,}")
     print(f"  Output tokens              : {total_out_tok:,}")
     print(f"  Estimated cost             : ${total_cost:.4f}")
-    print(f"  Total data sent            : {total_req_bytes/1024:.1f} KB")
-    print(f"  Total data received        : {total_res_bytes/1024:.1f} KB")
+    print(f"  Total data sent            : {total_req_bytes / 1024:.1f} KB")
+    print(f"  Total data received        : {total_res_bytes / 1024:.1f} KB")
     print(f"  ⚠️  Sensitive pattern hits  : {len(sensitive_rows)}")
     print("─" * 55)
 
@@ -817,7 +853,8 @@ def run_analyze(sessions_dir: Optional[str] = None):
 # PLOTTING (--plot)
 # ─────────────────────────────────────────────
 
-def _load_latest_csv(sessions_dir: Optional[str] = None) -> Tuple[Optional[Path], List[dict]]:
+
+def _load_latest_csv(sessions_dir: Optional[str] = None) -> tuple[Optional[Path], list[dict]]:
     """Load the latest CSV file and return (path, rows)."""
     search_dir = Path(sessions_dir) if sessions_dir else SESSION_DIR
     csvs = sorted(search_dir.glob("claude_watch_*.csv"), key=os.path.getmtime)
@@ -825,7 +862,7 @@ def _load_latest_csv(sessions_dir: Optional[str] = None) -> Tuple[Optional[Path]
         print(f"No CSV files found in {search_dir}")
         return None, []
     latest = csvs[-1]
-    with open(latest, newline='', encoding='utf-8') as f:
+    with open(latest, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
     return latest, rows
@@ -835,9 +872,9 @@ def run_plot(sessions_dir: Optional[str] = None):
     """Generate comprehensive matplotlib dashboard from captured CSV data."""
     try:
         import matplotlib
+
         matplotlib.use("Agg")  # non-interactive backend
         import matplotlib.pyplot as plt
-        import matplotlib.dates as mdates
         from matplotlib.gridspec import GridSpec
     except ImportError:
         print("matplotlib not installed. Run: pip3 install matplotlib")
@@ -862,12 +899,12 @@ def run_plot(sessions_dir: Optional[str] = None):
         except (ValueError, TypeError):
             timestamps.append(datetime.now(timezone.utc))
 
-    input_tokens  = [int(r.get("input_tokens", 0))  for r in rows]
-    output_tokens = [int(r.get("output_tokens", 0))  for r in rows]
-    costs         = [float(r.get("estimated_cost_usd", 0)) for r in rows]
-    latencies     = [int(r.get("latency_ms", 0))     for r in rows]
-    req_sizes     = [int(r.get("request_size_bytes", 0))  for r in rows]
-    res_sizes     = [int(r.get("response_size_bytes", 0)) for r in rows]
+    input_tokens = [int(r.get("input_tokens", 0)) for r in rows]
+    output_tokens = [int(r.get("output_tokens", 0)) for r in rows]
+    costs = [float(r.get("estimated_cost_usd", 0)) for r in rows]
+    latencies = [int(r.get("latency_ms", 0)) for r in rows]
+    req_sizes = [int(r.get("request_size_bytes", 0)) for r in rows]
+    res_sizes = [int(r.get("response_size_bytes", 0)) for r in rows]
     cumulative_cost = []
     running = 0.0
     for c in costs:
@@ -875,7 +912,7 @@ def run_plot(sessions_dir: Optional[str] = None):
         cumulative_cost.append(running)
 
     services = [r.get("destination_service", "unknown") for r in rows]
-    models   = [r.get("model", "unknown") or "unknown" for r in rows]
+    models = [r.get("model", "unknown") or "unknown" for r in rows]
 
     # Tool frequency
     tool_freq = defaultdict(int)
@@ -909,22 +946,25 @@ def run_plot(sessions_dir: Optional[str] = None):
 
     # ── Create figure ──
     fig = plt.figure(figsize=(24, 18))
-    fig.suptitle(f"Claude Watch — AI Agent Observatory\n{latest.name}",
-                 fontsize=16, fontweight="bold", y=0.98)
+    fig.suptitle(f"Claude Watch — AI Agent Observatory\n{latest.name}", fontsize=16, fontweight="bold", y=0.98)
     gs = GridSpec(4, 3, figure=fig, hspace=0.35, wspace=0.3)
 
     colors = {
-        "input": "#4A90D9", "output": "#E8744F", "cost": "#50C878",
-        "latency": "#9B59B6", "sent": "#E74C3C", "recv": "#3498DB",
-        "sensitive": "#FF0000", "bg": "#1a1a2e", "grid": "#333366",
+        "input": "#4A90D9",
+        "output": "#E8744F",
+        "cost": "#50C878",
+        "latency": "#9B59B6",
+        "sent": "#E74C3C",
+        "recv": "#3498DB",
+        "sensitive": "#FF0000",
+        "bg": "#1a1a2e",
+        "grid": "#333366",
     }
 
     # 1) Token usage over time (stacked area)
     ax1 = fig.add_subplot(gs[0, 0])
-    ax1.fill_between(range(len(rows)), input_tokens, alpha=0.7,
-                     label="Input", color=colors["input"])
-    ax1.fill_between(range(len(rows)), output_tokens, alpha=0.7,
-                     label="Output", color=colors["output"])
+    ax1.fill_between(range(len(rows)), input_tokens, alpha=0.7, label="Input", color=colors["input"])
+    ax1.fill_between(range(len(rows)), output_tokens, alpha=0.7, label="Output", color=colors["output"])
     ax1.set_title("Token Usage Per Turn", fontweight="bold")
     ax1.set_xlabel("Turn #")
     ax1.set_ylabel("Tokens")
@@ -933,10 +973,8 @@ def run_plot(sessions_dir: Optional[str] = None):
 
     # 2) Cumulative cost
     ax2 = fig.add_subplot(gs[0, 1])
-    ax2.plot(range(len(rows)), cumulative_cost, color=colors["cost"],
-             linewidth=2, label="Cumulative Cost")
-    ax2.fill_between(range(len(rows)), cumulative_cost, alpha=0.2,
-                     color=colors["cost"])
+    ax2.plot(range(len(rows)), cumulative_cost, color=colors["cost"], linewidth=2, label="Cumulative Cost")
+    ax2.fill_between(range(len(rows)), cumulative_cost, alpha=0.2, color=colors["cost"])
     ax2.set_title("Cumulative Cost (USD)", fontweight="bold")
     ax2.set_xlabel("Turn #")
     ax2.set_ylabel("USD")
@@ -944,10 +982,14 @@ def run_plot(sessions_dir: Optional[str] = None):
     ax2.grid(True, alpha=0.3)
     # Annotate final cost
     if cumulative_cost:
-        ax2.annotate(f"${cumulative_cost[-1]:.4f}",
-                     xy=(len(rows)-1, cumulative_cost[-1]),
-                     fontsize=10, fontweight="bold", color=colors["cost"],
-                     ha="right")
+        ax2.annotate(
+            f"${cumulative_cost[-1]:.4f}",
+            xy=(len(rows) - 1, cumulative_cost[-1]),
+            fontsize=10,
+            fontweight="bold",
+            color=colors["cost"],
+            ha="right",
+        )
 
     # 3) Service breakdown (pie)
     ax3 = fig.add_subplot(gs[0, 2])
@@ -955,21 +997,18 @@ def run_plot(sessions_dir: Optional[str] = None):
         labels = list(svc_freq.keys())
         sizes = list(svc_freq.values())
         wedges, texts, autotexts = ax3.pie(
-            sizes, labels=None, autopct='%1.1f%%', startangle=90,
-            textprops={'fontsize': 7})
-        ax3.legend(labels, loc="center left", bbox_to_anchor=(0.85, 0.5),
-                   fontsize=6)
+            sizes, labels=None, autopct="%1.1f%%", startangle=90, textprops={"fontsize": 7}
+        )
+        ax3.legend(labels, loc="center left", bbox_to_anchor=(0.85, 0.5), fontsize=6)
     ax3.set_title("Destination Services", fontweight="bold")
 
     # 4) Latency distribution (histogram)
     ax4 = fig.add_subplot(gs[1, 0])
-    nonzero_lat = [l for l in latencies if l > 0]
+    nonzero_lat = [lat for lat in latencies if lat > 0]
     if nonzero_lat:
-        ax4.hist(nonzero_lat, bins=min(30, len(nonzero_lat)),
-                 color=colors["latency"], alpha=0.8, edgecolor="white")
-        median_lat = sorted(nonzero_lat)[len(nonzero_lat)//2]
-        ax4.axvline(median_lat, color="red", linestyle="--", linewidth=1,
-                    label=f"Median: {median_lat}ms")
+        ax4.hist(nonzero_lat, bins=min(30, len(nonzero_lat)), color=colors["latency"], alpha=0.8, edgecolor="white")
+        median_lat = sorted(nonzero_lat)[len(nonzero_lat) // 2]
+        ax4.axvline(median_lat, color="red", linestyle="--", linewidth=1, label=f"Median: {median_lat}ms")
         ax4.legend(fontsize=8)
     ax4.set_title("Latency Distribution (ms)", fontweight="bold")
     ax4.set_xlabel("Latency (ms)")
@@ -997,53 +1036,93 @@ def run_plot(sessions_dir: Optional[str] = None):
         sorted_models = sorted(model_freq.items(), key=lambda x: x[1], reverse=True)[:8]
         m_names = [m[0][:25] for m in sorted_models]
         m_counts = [m[1] for m in sorted_models]
-        bars = ax6.bar(range(len(m_names)), m_counts, color=colors["output"],
-                       alpha=0.8)
+        bars = ax6.bar(range(len(m_names)), m_counts, color=colors["output"], alpha=0.8)
         ax6.set_xticks(range(len(m_names)))
         ax6.set_xticklabels(m_names, rotation=30, ha="right", fontsize=7)
         for bar, count in zip(bars, m_counts):
-            ax6.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.1,
-                     str(count), ha='center', va='bottom', fontsize=8)
+            ax6.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                bar.get_height() + 0.1,
+                str(count),
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
     ax6.set_title("Model Usage", fontweight="bold")
     ax6.set_ylabel("Requests")
     ax6.grid(True, alpha=0.3, axis="y")
 
     # 7) Data volume over time (dual axis)
     ax7 = fig.add_subplot(gs[2, 0:2])
-    ax7.plot(range(len(rows)), [s/1024 for s in req_sizes],
-             color=colors["sent"], alpha=0.8, label="Request (KB)", linewidth=1)
-    ax7.plot(range(len(rows)), [s/1024 for s in res_sizes],
-             color=colors["recv"], alpha=0.8, label="Response (KB)", linewidth=1)
-    ax7.fill_between(range(len(rows)), [s/1024 for s in req_sizes],
-                     alpha=0.15, color=colors["sent"])
-    ax7.fill_between(range(len(rows)), [s/1024 for s in res_sizes],
-                     alpha=0.15, color=colors["recv"])
+    ax7.plot(
+        range(len(rows)),
+        [s / 1024 for s in req_sizes],
+        color=colors["sent"],
+        alpha=0.8,
+        label="Request (KB)",
+        linewidth=1,
+    )
+    ax7.plot(
+        range(len(rows)),
+        [s / 1024 for s in res_sizes],
+        color=colors["recv"],
+        alpha=0.8,
+        label="Response (KB)",
+        linewidth=1,
+    )
+    ax7.fill_between(range(len(rows)), [s / 1024 for s in req_sizes], alpha=0.15, color=colors["sent"])
+    ax7.fill_between(range(len(rows)), [s / 1024 for s in res_sizes], alpha=0.15, color=colors["recv"])
     ax7.set_title("Data Volume Per Turn (KB)", fontweight="bold")
     ax7.set_xlabel("Turn #")
     ax7.set_ylabel("KB")
     ax7.legend(fontsize=8)
     ax7.grid(True, alpha=0.3)
-    total_sent = sum(req_sizes)/1024/1024
-    total_recv = sum(res_sizes)/1024/1024
-    ax7.annotate(f"Total: {total_sent:.1f}MB sent, {total_recv:.1f}MB recv",
-                 xy=(0.02, 0.95), xycoords="axes fraction", fontsize=8,
-                 bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow"))
+    total_sent = sum(req_sizes) / 1024 / 1024
+    total_recv = sum(res_sizes) / 1024 / 1024
+    ax7.annotate(
+        f"Total: {total_sent:.1f}MB sent, {total_recv:.1f}MB recv",
+        xy=(0.02, 0.95),
+        xycoords="axes fraction",
+        fontsize=8,
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow"),
+    )
 
     # 8) Sensitive data alert timeline
     ax8 = fig.add_subplot(gs[2, 2])
     if sensitive_turns:
-        ax8.scatter(sensitive_turns, [1]*len(sensitive_turns),
-                    color=colors["sensitive"], s=100, marker="X",
-                    zorder=5, label=f"{len(sensitive_turns)} alerts")
+        ax8.scatter(
+            sensitive_turns,
+            [1] * len(sensitive_turns),
+            color=colors["sensitive"],
+            s=100,
+            marker="X",
+            zorder=5,
+            label=f"{len(sensitive_turns)} alerts",
+        )
         for i, (turn, label) in enumerate(zip(sensitive_turns, sensitive_labels)):
-            ax8.annotate(label, (turn, 1), textcoords="offset points",
-                         xytext=(0, 10 + (i % 3) * 12), fontsize=6,
-                         color="red", ha="center", rotation=30)
+            ax8.annotate(
+                label,
+                (turn, 1),
+                textcoords="offset points",
+                xytext=(0, 10 + (i % 3) * 12),
+                fontsize=6,
+                color="red",
+                ha="center",
+                rotation=30,
+            )
         ax8.legend(fontsize=8)
     else:
-        ax8.text(0.5, 0.5, "No sensitive data detected",
-                 transform=ax8.transAxes, ha="center", va="center",
-                 fontsize=12, color="green", fontweight="bold")
+        ax8.text(
+            0.5,
+            0.5,
+            "No sensitive data detected",
+            transform=ax8.transAxes,
+            ha="center",
+            va="center",
+            fontsize=12,
+            color="green",
+            fontweight="bold",
+        )
     ax8.set_title("Sensitive Data Alerts", fontweight="bold")
     ax8.set_xlabel("Turn #")
     ax8.set_yticks([])
@@ -1064,8 +1143,7 @@ def run_plot(sessions_dir: Optional[str] = None):
     for idx, svc in enumerate(unique_svcs):
         svc_indices = [i for i, s in enumerate(services) if s == svc]
         svc_lats = [latencies[i] for i in svc_indices]
-        ax10.scatter(svc_indices, svc_lats, s=15, alpha=0.7,
-                     color=svc_colors[idx], label=svc[:20])
+        ax10.scatter(svc_indices, svc_lats, s=15, alpha=0.7, color=svc_colors[idx], label=svc[:20])
     ax10.set_title("Latency by Service (ms)", fontweight="bold")
     ax10.set_xlabel("Turn #")
     ax10.set_ylabel("ms")
@@ -1084,42 +1162,49 @@ def run_plot(sessions_dir: Optional[str] = None):
     avg_lat = sum(latencies) / len(latencies) if latencies else 0
     summary = (
         f"SUMMARY\n"
-        f"{'─'*35}\n"
+        f"{'─' * 35}\n"
         f"Total requests:     {total_turns}\n"
         f"API calls:          {api_count}\n"
         f"Telemetry calls:    {tel_count}\n"
-        f"{'─'*35}\n"
+        f"{'─' * 35}\n"
         f"Input tokens:       {total_in:,}\n"
         f"Output tokens:      {total_out:,}\n"
         f"Total cost:         ${total_cost_val:.4f}\n"
-        f"{'─'*35}\n"
+        f"{'─' * 35}\n"
         f"Avg latency:        {avg_lat:.0f}ms\n"
         f"Data sent:          {total_sent:.2f} MB\n"
         f"Data received:      {total_recv:.2f} MB\n"
-        f"{'─'*35}\n"
+        f"{'─' * 35}\n"
         f"Sensitive alerts:   {len(sensitive_turns)}\n"
         f"Unique tools:       {len(tool_freq)}\n"
         f"Unique services:    {len(svc_freq)}\n"
         f"Unique models:      {len(model_freq)}\n"
     )
-    ax11.text(0.05, 0.95, summary, transform=ax11.transAxes,
-              fontsize=10, verticalalignment="top", fontfamily="monospace",
-              bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f0f0"))
+    ax11.text(
+        0.05,
+        0.95,
+        summary,
+        transform=ax11.transAxes,
+        fontsize=10,
+        verticalalignment="top",
+        fontfamily="monospace",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f0f0"),
+    )
 
     # Save
     PLOT_DIR = OUTPUT_DIR / "plots"
     PLOT_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     plot_path = PLOT_DIR / f"dashboard_{ts}.png"
-    fig.savefig(plot_path, dpi=150, bbox_inches="tight",
-                facecolor="white", edgecolor="none")
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight", facecolor="white", edgecolor="none")
     plt.close(fig)
 
     print(f"Dashboard saved to: {plot_path}")
-    print(f"Opening...")
+    print("Opening...")
 
     # Auto-open on macOS
     import platform
+
     if platform.system() == "Darwin":
         subprocess.run(["open", str(plot_path)], check=False)
     elif platform.system() == "Linux":
@@ -1132,11 +1217,12 @@ def run_plot(sessions_dir: Optional[str] = None):
 
 DASHBOARD_PORT = 9081
 
+
 def run_dashboard(sessions_dir: Optional[str] = None):
     """Launch a live web dashboard to explore captured CSV data."""
     import http.server
-    import urllib.parse
     import threading
+    import urllib.parse
 
     latest, rows = _load_latest_csv(sessions_dir)
     if not rows:
@@ -1166,16 +1252,18 @@ def run_dashboard(sessions_dir: Optional[str] = None):
                 self.send_response(404)
                 self.end_headers()
 
-    print(f"\nClaude Watch Dashboard")
-    print(f"=" * 50)
+    print("\nClaude Watch Dashboard")
+    print("=" * 50)
     print(f"CSV: {latest.name} ({len(rows)} rows)")
     print(f"Open: http://localhost:{DASHBOARD_PORT}")
-    print(f"Press Ctrl+C to stop\n")
+    print("Press Ctrl+C to stop\n")
 
     import platform
+
     if platform.system() == "Darwin":
-        threading.Timer(1.5, lambda: subprocess.run(
-            ["open", f"http://localhost:{DASHBOARD_PORT}"], check=False)).start()
+        threading.Timer(
+            1.5, lambda: subprocess.run(["open", f"http://localhost:{DASHBOARD_PORT}"], check=False)
+        ).start()
 
     server = http.server.HTTPServer(("0.0.0.0", DASHBOARD_PORT), DashboardHandler)
     try:
@@ -1189,6 +1277,7 @@ def _dashboard_html() -> str:
     """Return a self-contained HTML/JS dashboard page."""
     try:
         import importlib.resources
+
         return importlib.resources.files("claude_monitoring").joinpath("watch_dashboard.html").read_text()
     except Exception:
         return "<html><body><h1>Dashboard HTML not found</h1></body></html>"
@@ -1199,26 +1288,26 @@ def _dashboard_html() -> str:
 # ─────────────────────────────────────────────
 
 AI_PROCESS_PATTERNS = {
-    "claude":       "Claude Code CLI",
-    "anthropic":    "Anthropic SDK",
-    "openai":       "OpenAI SDK/CLI",
-    "copilot":      "GitHub Copilot",
-    "ollama":       "Ollama (local LLM)",
-    "lmstudio":     "LM Studio",
-    "lm-studio":    "LM Studio",
-    "llamafile":    "Llamafile",
-    "llama.cpp":    "llama.cpp",
-    "mlx_lm":       "MLX LM (Apple Silicon)",
-    "vllm":         "vLLM Server",
+    "claude": "Claude Code CLI",
+    "anthropic": "Anthropic SDK",
+    "openai": "OpenAI SDK/CLI",
+    "copilot": "GitHub Copilot",
+    "ollama": "Ollama (local LLM)",
+    "lmstudio": "LM Studio",
+    "lm-studio": "LM Studio",
+    "llamafile": "Llamafile",
+    "llama.cpp": "llama.cpp",
+    "mlx_lm": "MLX LM (Apple Silicon)",
+    "vllm": "vLLM Server",
     "text-generation": "TGI Server",
-    "chatgpt":      "ChatGPT Desktop",
-    "cursor":       "Cursor IDE (AI)",
-    "windsurf":     "Windsurf IDE (AI)",
-    "aider":        "Aider (AI pair prog)",
-    "continue":     "Continue.dev",
-    "cody":         "Sourcegraph Cody",
-    "tabby":        "TabbyML",
-    "codium":       "Codium AI",
+    "chatgpt": "ChatGPT Desktop",
+    "cursor": "Cursor IDE (AI)",
+    "windsurf": "Windsurf IDE (AI)",
+    "aider": "Aider (AI pair prog)",
+    "continue": "Continue.dev",
+    "cody": "Sourcegraph Cody",
+    "tabby": "TabbyML",
+    "codium": "Codium AI",
 }
 
 
@@ -1247,11 +1336,7 @@ def run_scan():
 
         for pattern, name in AI_PROCESS_PATTERNS.items():
             if pattern.lower() in cmd.lower():
-                found.append({
-                    "pid": pid, "cpu": cpu, "mem": mem,
-                    "name": name, "pattern": pattern,
-                    "cmd": cmd[:120]
-                })
+                found.append({"pid": pid, "cpu": cpu, "mem": mem, "name": name, "pattern": pattern, "cmd": cmd[:120]})
                 break
 
     if found:
@@ -1267,8 +1352,7 @@ def run_scan():
     print("─" * 55)
     print("Checking network connections to AI services...\n")
     try:
-        result = subprocess.run(["lsof", "-i", "-n", "-P"],
-                                capture_output=True, text=True)
+        result = subprocess.run(["lsof", "-i", "-n", "-P"], capture_output=True, text=True)
         ai_connections = []
         for line in result.stdout.strip().split("\n"):
             for host in AI_HOSTS:
@@ -1298,6 +1382,7 @@ def run_scan():
     for port, name in local_ports.items():
         try:
             import socket
+
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(0.5)
             result = s.connect_ex(("127.0.0.1", port))
@@ -1315,6 +1400,7 @@ def run_scan():
 # ─────────────────────────────────────────────
 # TEST DATA GENERATOR (--generate-test)
 # ─────────────────────────────────────────────
+
 
 def run_generate_test():
     """Generate a synthetic test CSV with realistic data."""
@@ -1359,15 +1445,14 @@ def run_generate_test():
         "I've optimized the query by adding proper indexes and using CTEs.",
         "Implementing rate limiting using a sliding window algorithm.",
     ]
-    services = ["anthropic_api"] * 14 + ["anthropic_telemetry"] * 3 + \
-               ["error_reporting"] * 2 + ["github_copilot"] * 1
+    services = ["anthropic_api"] * 14 + ["anthropic_telemetry"] * 3 + ["error_reporting"] * 2 + ["github_copilot"] * 1
     models = ["claude-sonnet-4-5-20250514"] * 12 + ["claude-opus-4-20250512"] * 8
     tool_sets = [
         '["bash", "str_replace_editor"]',
         '["bash"]',
         '["read_file", "str_replace_editor"]',
         '["web_search", "bash"]',
-        '[]',
+        "[]",
         '["str_replace_editor"]',
         '["bash", "read_file"]',
         '["bash", "str_replace_editor", "read_file"]',
@@ -1377,23 +1462,30 @@ def run_generate_test():
     for i in range(20):
         t = base_time.replace(second=0)
         from datetime import timedelta
+
         t = t + timedelta(minutes=i * 2, seconds=random.randint(0, 59))
         in_tok = random.randint(1000, 80000)
         out_tok = random.randint(100, 4000)
         model = models[i]
-        cost = estimate_cost(model, in_tok, out_tok,
-                             random.randint(0, 5000), random.randint(0, 2000))
+        cost = estimate_cost(model, in_tok, out_tok, random.randint(0, 5000), random.randint(0, 2000))
         service = services[i]
         tools_json = random.choice(tool_sets)
         tools_list = json.loads(tools_json)
 
         bash_cmds = []
         if "bash" in tools_list:
-            bash_cmds = [random.choice([
-                "python3 -m pytest tests/", "git diff --stat",
-                "npm run build", "docker-compose up -d",
-                "cat /etc/hosts", "ls -la src/"
-            ])]
+            bash_cmds = [
+                random.choice(
+                    [
+                        "python3 -m pytest tests/",
+                        "git diff --stat",
+                        "npm run build",
+                        "docker-compose up -d",
+                        "cat /etc/hosts",
+                        "ls -la src/",
+                    ]
+                )
+            ]
 
         sensitive = ""
         sensitive_count = 0
@@ -1443,7 +1535,7 @@ def run_generate_test():
         }
         rows.append(row)
 
-    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         for row in rows:
@@ -1451,15 +1543,16 @@ def run_generate_test():
 
     print(f"\nGenerated test CSV: {csv_path}")
     print(f"  {len(rows)} rows with realistic AI agent traffic data")
-    print(f"\nNext steps:")
-    print(f"  claude-watch --analyze")
-    print(f"  claude-watch --plot")
-    print(f"  claude-watch --dashboard")
+    print("\nNext steps:")
+    print("  claude-watch --analyze")
+    print("  claude-watch --plot")
+    print("  claude-watch --dashboard")
 
 
 # ─────────────────────────────────────────────
 # ENTRYPOINT
 # ─────────────────────────────────────────────
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1475,18 +1568,16 @@ Examples:
   claude-watch --dashboard       # Launch live web dashboard
   claude-watch --scan            # Detect running AI agents
   claude-watch --generate-test   # Create test CSV data
-        """
+        """,
     )
-    parser.add_argument("--setup",    action="store_true", help="Install deps, trust cert")
-    parser.add_argument("--start",    action="store_true", help="Start the proxy")
-    parser.add_argument("--analyze",  action="store_true", help="Analyze latest session CSV")
-    parser.add_argument("--plot",     action="store_true", help="Generate dashboard plots (PNG)")
-    parser.add_argument("--dashboard",action="store_true", help="Launch live web dashboard")
-    parser.add_argument("--scan",     action="store_true", help="Scan for AI processes")
-    parser.add_argument("--generate-test", action="store_true",
-                        help="Generate synthetic test CSV")
-    parser.add_argument("--dir",      type=str, default=None,
-                        help="Session dir for --analyze/--plot/--dashboard")
+    parser.add_argument("--setup", action="store_true", help="Install deps, trust cert")
+    parser.add_argument("--start", action="store_true", help="Start the proxy")
+    parser.add_argument("--analyze", action="store_true", help="Analyze latest session CSV")
+    parser.add_argument("--plot", action="store_true", help="Generate dashboard plots (PNG)")
+    parser.add_argument("--dashboard", action="store_true", help="Launch live web dashboard")
+    parser.add_argument("--scan", action="store_true", help="Scan for AI processes")
+    parser.add_argument("--generate-test", action="store_true", help="Generate synthetic test CSV")
+    parser.add_argument("--dir", type=str, default=None, help="Session dir for --analyze/--plot/--dashboard")
 
     args = parser.parse_args()
 
