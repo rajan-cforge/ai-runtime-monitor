@@ -26,6 +26,7 @@ dev: check-python ## Install with dev dependencies (linting, testing)
 	$(PIP) install -e ".[dev]"
 
 start: ## Start the monitor + dashboard on http://localhost:9081
+	@lsof -ti :9081 2>/dev/null | xargs kill -9 2>/dev/null || true
 	$(PYTHON) -m claude_monitoring.monitor --start
 
 stop: ## Stop the monitor
