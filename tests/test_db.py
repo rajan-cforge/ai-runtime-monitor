@@ -1,20 +1,13 @@
 """Tests for init_db() and database operations."""
 
-from unittest.mock import patch
-
-from claude_monitoring.monitor import init_db
+from claude_monitoring.db import init_db, insert_api_call
 
 
 class TestInitDb:
     def _init(self, tmp_path):
         db_path = tmp_path / "test.db"
-        output_dir = tmp_path / "output"
-        output_dir.mkdir(exist_ok=True)
-        with (
-            patch("claude_monitoring.monitor.DB_PATH", db_path),
-            patch("claude_monitoring.monitor.OUTPUT_DIR", output_dir),
-        ):
-            conn = init_db()
+        (tmp_path / "output").mkdir(exist_ok=True)
+        conn = init_db(db_path)
         return conn, db_path
 
     def test_creates_all_tables(self, tmp_path):
@@ -22,23 +15,17 @@ class TestInitDb:
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         tables = {row[0] for row in cursor.fetchall()}
-        expected = {"events", "sessions", "processes", "connections", "file_events", "browser_sessions"}
+        expected = {"events", "sessions", "processes", "connections", "file_events", "browser_sessions", "api_calls"}
         assert expected.issubset(tables)
         conn.close()
 
     def test_idempotent(self, tmp_path):
         """Calling init_db twice should not error."""
         db_path = tmp_path / "test.db"
-        output_dir = tmp_path / "output"
-        output_dir.mkdir(exist_ok=True)
-        with (
-            patch("claude_monitoring.monitor.DB_PATH", db_path),
-            patch("claude_monitoring.monitor.OUTPUT_DIR", output_dir),
-        ):
-            conn1 = init_db()
-            conn1.close()
-            conn2 = init_db()
-            conn2.close()
+        conn1 = init_db(db_path)
+        conn1.close()
+        conn2 = init_db(db_path)
+        conn2.close()
 
     def test_wal_mode(self, tmp_path):
         conn, _ = self._init(tmp_path)
@@ -76,6 +63,8 @@ class TestInitDb:
         indexes = {row[0] for row in cursor.fetchall()}
         assert "idx_events_ts" in indexes
         assert "idx_events_session" in indexes
+        assert "idx_api_calls_ts" in indexes
+        assert "idx_api_calls_session" in indexes
         conn.close()
 
     def test_file_events_table(self, tmp_path):
@@ -98,3 +87,71 @@ class TestInitDb:
         row = conn.execute("SELECT COUNT(*) FROM browser_sessions").fetchone()
         assert row[0] == 1
         conn.close()
+
+    def test_api_calls_table(self, tmp_path):
+        conn, _ = self._init(tmp_path)
+        conn.execute(
+            """INSERT INTO api_calls (timestamp, session_id, destination_service, model, input_tokens, output_tokens)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            ("2026-01-01T00:00:00Z", "sess-1", "anthropic_api", "claude-sonnet-4", 1000, 500),
+        )
+        conn.commit()
+        row = conn.execute("SELECT COUNT(*) FROM api_calls").fetchone()
+        assert row[0] == 1
+        conn.close()
+
+
+class TestInsertApiCall:
+    def test_insert_api_call_success(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        conn = init_db(db_path)
+        conn.close()
+
+        record = {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "session_id": "test-123",
+            "turn_id": "turn-1",
+            "turn_number": 1,
+            "destination_host": "api.anthropic.com",
+            "destination_service": "anthropic_api",
+            "endpoint_path": "/v1/messages",
+            "http_method": "POST",
+            "http_status": 200,
+            "model": "claude-sonnet-4",
+            "stream": "true",
+            "input_tokens": 5000,
+            "output_tokens": 1000,
+            "estimated_cost_usd": 0.03,
+            "latency_ms": 1500,
+            "stop_reason": "end_turn",
+            "request_id": "req-abc",
+        }
+        result = insert_api_call(db_path, record)
+        assert result is True
+
+        # Verify data was inserted
+        import sqlite3
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute("SELECT COUNT(*) FROM api_calls").fetchone()
+        assert row[0] == 1
+        conn.close()
+
+    def test_insert_api_call_no_db(self, tmp_path):
+        db_path = tmp_path / "nonexistent.db"
+        result = insert_api_call(db_path, {"timestamp": "now"})
+        assert result is False
+
+    def test_insert_api_call_none_path(self):
+        result = insert_api_call(None, {"timestamp": "now"})
+        assert result is False
+
+    def test_insert_api_call_defaults(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        conn = init_db(db_path)
+        conn.close()
+
+        # Minimal record — should use defaults for missing fields
+        record = {"timestamp": "2026-01-01T00:00:00Z"}
+        result = insert_api_call(db_path, record)
+        assert result is True

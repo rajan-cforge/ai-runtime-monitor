@@ -1,6 +1,6 @@
 """Tests for claude_watch utility functions."""
 
-from claude_monitoring.watch import estimate_cost, extract_file_paths, extract_urls
+from claude_monitoring.utils import estimate_cost, extract_file_paths, extract_urls
 
 
 class TestExtractFilePaths:

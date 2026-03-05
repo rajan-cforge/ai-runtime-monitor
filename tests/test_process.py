@@ -1,6 +1,6 @@
 """Tests for is_ai_process() and process matching logic."""
 
-from claude_monitoring.monitor import is_ai_process
+from claude_monitoring.utils import is_ai_process
 
 
 class TestIsAiProcess:

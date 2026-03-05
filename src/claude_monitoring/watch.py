@@ -41,213 +41,246 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
-
-OUTPUT_DIR = Path.home() / "claude_watch_output"
-SESSION_DIR = OUTPUT_DIR / "sessions"
-CERT_DIR = OUTPUT_DIR / "certs"
-PROXY_PORT = 9080
-
-AI_HOSTS = {
-    # Anthropic
-    "api.anthropic.com": "anthropic_api",
-    "statsig.anthropic.com": "anthropic_telemetry",
-    "console.anthropic.com": "anthropic_console",
-    # OpenAI / ChatGPT / Copilot
-    "api.openai.com": "openai_api",
-    "chatgpt.com": "chatgpt_web",
-    "copilot.githubusercontent.com": "github_copilot",
-    "copilot-proxy.githubusercontent.com": "github_copilot",
-    "githubcopilot.com": "github_copilot",
-    "api.githubcopilot.com": "github_copilot",
-    # Google
-    "generativelanguage.googleapis.com": "gemini_api",
-    "aistudio.google.com": "google_aistudio",
-    "aiplatform.googleapis.com": "vertex_ai",
-    # AWS
-    "bedrock.amazonaws.com": "aws_bedrock",
-    "bedrock-runtime.amazonaws.com": "aws_bedrock",
-    # Mistral
-    "api.mistral.ai": "mistral_api",
-    # Cohere
-    "api.cohere.ai": "cohere_api",
-    "api.cohere.com": "cohere_api",
-    # Groq
-    "api.groq.com": "groq_api",
-    # Together AI
-    "api.together.xyz": "together_api",
-    # Perplexity
-    "api.perplexity.ai": "perplexity_api",
-    # DeepSeek
-    "api.deepseek.com": "deepseek_api",
-    # xAI / Grok
-    "api.x.ai": "xai_grok_api",
-    # HuggingFace
-    "api-inference.huggingface.co": "huggingface_api",
-    "huggingface.co": "huggingface_web",
-    # Replicate
-    "api.replicate.com": "replicate_api",
-    # Fireworks
-    "api.fireworks.ai": "fireworks_api",
-    # Ollama (local)
-    "localhost:11434": "ollama_local",
-    "127.0.0.1:11434": "ollama_local",
-    # LM Studio (local)
-    "localhost:1234": "lmstudio_local",
-    "127.0.0.1:1234": "lmstudio_local",
-    # OpenRouter
-    "openrouter.ai": "openrouter_api",
-    # Azure OpenAI
-    "openai.azure.com": "azure_openai",
-    # Telemetry / analytics
-    "sentry.io": "error_reporting",
-    "ingest.sentry.io": "error_reporting",
-    "featuregates.cloud": "statsig_telemetry",
-    "api.statsig.com": "statsig_telemetry",
-    "events.statsig.com": "statsig_telemetry",
-    "api.segment.io": "segment_telemetry",
-    "api.amplitude.com": "amplitude_telemetry",
-}
-
-# Sensitive data patterns to flag before data leaves your machine
-SENSITIVE_PATTERNS = {
-    "aws_key": r"(?:AKIA|ASIA|AROA|AIDA)[A-Z0-9]{16}",
-    "aws_secret": r"(?i)aws.{0,20}secret.{0,20}['\"][A-Za-z0-9/+=]{40}['\"]",
-    "private_key": r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
-    "github_token": r"gh[pousr]_[A-Za-z0-9_]{36,}",
-    "api_key_generic": r"(?i)(?:api[_-]?key|apikey|api[_-]?secret)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{20,}",
-    "password_in_code": r"(?i)(?:password|passwd|pwd)\s*[:=]\s*['\"][^'\"]{6,}['\"]",
-    "jwt_token": r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
-    "credit_card": r"\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\b",
-    "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
-    "anthropic_key": r"sk-ant-[A-Za-z0-9\-_]{40,}",
-    "env_file": r"\.env(?:\.[a-z]+)?",
-    "ip_address": r"\b(?:10\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.)\d{1,3}\.\d{1,3}\b",
-}
-
-# Claude Code tool names to track
-TOOL_NAMES = {
-    "bash",
-    "computer",
-    "str_replace_editor",
-    "str_replace_based_edit_tool",
-    "read_file",
-    "write_file",
-    "create_file",
-    "list_directory",
-    "web_search",
-    "web_fetch",
-    "execute_code",
-    "file_editor",
-    "TodoRead",
-    "TodoWrite",
-    "Task",
-    "mcp__",
-}
-
-# Pricing per 1M tokens (Claude models, approximate)
-MODEL_PRICING = {
-    "claude-opus-4": {"input": 15.00, "output": 75.00},
-    "claude-sonnet-4": {"input": 3.00, "output": 15.00},
-    "claude-haiku-4": {"input": 0.80, "output": 4.00},
-    "claude-opus-4-5": {"input": 15.00, "output": 75.00},
-    "claude-sonnet-4-5": {"input": 3.00, "output": 15.00},
-    "claude-haiku-4-5": {"input": 0.80, "output": 4.00},
-    "claude-3-5-sonnet": {"input": 3.00, "output": 15.00},
-    "claude-3-5-haiku": {"input": 0.80, "output": 4.00},
-    "claude-3-opus": {"input": 15.00, "output": 75.00},
-    "default": {"input": 3.00, "output": 15.00},
-}
-
-CSV_COLUMNS = [
-    "timestamp",  # ISO 8601
-    "session_id",  # UUID per mitmproxy launch
-    "turn_id",  # UUID per request/response pair
-    "turn_number",  # Sequential int
-    "destination_host",  # e.g. api.anthropic.com
-    "destination_service",  # e.g. anthropic_api
-    "endpoint_path",  # e.g. /v1/messages
-    "http_method",  # GET/POST
-    "http_status",  # 200, 429, etc.
-    "model",  # claude-sonnet-4-5 etc.
-    "stream",  # true/false
-    "input_tokens",  # from usage block
-    "output_tokens",  # from usage block
-    "cache_read_tokens",  # cache hits
-    "cache_write_tokens",  # cache writes
-    "estimated_cost_usd",  # computed from token counts
-    "request_size_bytes",  # raw request body size
-    "response_size_bytes",  # raw response body size
-    "latency_ms",  # time from request to full response
-    "num_messages",  # messages[] length in request
-    "system_prompt_chars",  # length of system prompt
-    "last_user_msg_preview",  # first 300 chars of last user message
-    "assistant_msg_preview",  # first 300 chars of assistant response
-    "tool_calls",  # JSON array of tool names invoked
-    "tool_call_count",  # int
-    "bash_commands",  # JSON array of bash commands run
-    "files_read",  # JSON array of file paths read
-    "files_written",  # JSON array of file paths written
-    "urls_fetched",  # JSON array of URLs fetched by agent
-    "sensitive_patterns",  # comma-separated pattern names detected
-    "sensitive_pattern_count",  # int
-    "content_types_sent",  # text/image/tool_result etc
-    "stop_reason",  # end_turn / tool_use / max_tokens
-    "request_id",  # x-request-id header from Anthropic
-    "raw_request_hash",  # sha256 of request body (for dedup)
-]
-
+from claude_monitoring.config import (
+    get_dashboard_port,
+    get_db_path,
+    get_output_dir,
+    get_proxy_port,
+    get_session_dir,
+)
+from claude_monitoring.constants import AI_HOSTS, CSV_COLUMNS
+from claude_monitoring.db import insert_api_call
+from claude_monitoring.utils import estimate_cost, extract_file_paths, extract_urls, scan_sensitive
 
 # ─────────────────────────────────────────────
-# UTILITY FUNCTIONS
+# STANDALONE PARSING FUNCTIONS (testable without mitmproxy)
 # ─────────────────────────────────────────────
 
 
-def scan_sensitive(text: str) -> list[str]:
-    """Return list of sensitive pattern names found in text."""
-    found = []
-    for name, pattern in SENSITIVE_PATTERNS.items():
-        if re.search(pattern, text):
-            found.append(name)
-    return found
+def parse_request_body(body: dict, record: dict) -> dict:
+    """Parse an Anthropic API request body and populate record fields.
+
+    Args:
+        body: Parsed JSON request body.
+        record: Mutable record dict to populate.
+
+    Returns:
+        Updated record dict.
+    """
+    record["model"] = body.get("model", "")
+    record["stream"] = str(body.get("stream", False)).lower()
+
+    messages = body.get("messages", [])
+    record["num_messages"] = len(messages)
+
+    # System prompt length
+    system = body.get("system", "")
+    if isinstance(system, list):
+        system = " ".join(b.get("text", "") for b in system if isinstance(b, dict))
+    record["system_prompt_chars"] = len(system)
+
+    # Scan full request for sensitive patterns
+    full_text = json.dumps(body)
+    found = scan_sensitive(full_text, names_only=True)
+    record["sensitive_patterns"] = ",".join(found)
+    record["sensitive_pattern_count"] = len(found)
+
+    # Analyze each message
+    tool_calls, bash_cmds, files_read, files_written, urls = [], [], [], [], []
+    content_types = set()
+    last_user_text = ""
+
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+
+        if isinstance(content, str):
+            content_types.add("text")
+            if role == "user":
+                last_user_text = content
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type", "")
+                content_types.add(btype)
+
+                if btype == "tool_use":
+                    name = block.get("name", "")
+                    tool_calls.append(name)
+                    inp = block.get("input", {})
+                    inp_str = json.dumps(inp)
+
+                    # Bash command extraction
+                    if name == "bash":
+                        cmd = inp.get("command", inp.get("cmd", ""))
+                        if cmd:
+                            bash_cmds.append(cmd[:200])
+
+                    # File path extraction
+                    if name in ("str_replace_editor", "write_file", "create_file", "file_editor"):
+                        fp = inp.get("path", inp.get("file_path", ""))
+                        if fp:
+                            files_written.append(fp)
+                    elif name in ("read_file", "view"):
+                        fp = inp.get("path", inp.get("file_path", ""))
+                        if fp:
+                            files_read.append(fp)
+
+                    # URL extraction
+                    urls.extend(extract_urls(inp_str))
+
+                    # File paths from bash commands
+                    if name == "bash":
+                        cmd = inp.get("command", "")
+                        files_read.extend(extract_file_paths(cmd))
+
+                elif btype == "tool_result":
+                    result_content = block.get("content", "")
+                    if isinstance(result_content, list):
+                        result_content = json.dumps(result_content)
+                    urls.extend(extract_urls(str(result_content)))
+
+                elif btype == "text":
+                    if role == "user":
+                        last_user_text = block.get("text", "")
+
+    record["last_user_msg_preview"] = last_user_text[:300].replace("\n", " ").replace(",", ";")
+    record["tool_calls"] = json.dumps(list(set(tool_calls)))
+    record["tool_call_count"] = len(tool_calls)
+    record["bash_commands"] = json.dumps(bash_cmds[:10])
+    record["files_read"] = json.dumps(list(set(files_read))[:20])
+    record["files_written"] = json.dumps(list(set(files_written))[:20])
+    record["urls_fetched"] = json.dumps(list(set(urls))[:20])
+    record["content_types_sent"] = ",".join(sorted(content_types))
+
+    return record
 
 
-def extract_file_paths(text: str) -> list[str]:
-    """Extract file paths mentioned in text."""
-    paths = re.findall(r'(?:^|[\s\'"])(/(?:[\w\-./]+))', text)
-    return list(set(p for p in paths if len(p) > 3 and "." in p.split("/")[-1]))
+def parse_response_body(body: dict, record: dict) -> dict:
+    """Parse an Anthropic API response body and populate record fields.
 
+    Args:
+        body: Parsed JSON response body.
+        record: Mutable record dict to populate.
 
-def extract_urls(text: str) -> list[str]:
-    """Extract HTTP/HTTPS URLs from text."""
-    return re.findall(r'https?://[^\s\'"<>]+', text)
+    Returns:
+        Updated record dict.
+    """
+    usage = body.get("usage", {})
+    record["input_tokens"] = usage.get("input_tokens", 0)
+    record["output_tokens"] = usage.get("output_tokens", 0)
+    record["cache_read_tokens"] = usage.get("cache_read_input_tokens", 0)
+    record["cache_write_tokens"] = usage.get("cache_creation_input_tokens", 0)
+    record["stop_reason"] = body.get("stop_reason", "")
+    record["model"] = record["model"] or body.get("model", "")
 
-
-def estimate_cost(
-    model: str, input_tokens: int, output_tokens: int, cache_read: int = 0, cache_write: int = 0
-) -> float:
-    """Estimate USD cost from token counts."""
-    pricing = MODEL_PRICING["default"]
-    # Match longest key first to avoid e.g. "claude-opus-4" matching before "claude-opus-4-5"
-    for key in sorted(MODEL_PRICING.keys(), key=len, reverse=True):
-        if key != "default" and key in model:
-            pricing = MODEL_PRICING[key]
-            break
-    cost = (
-        input_tokens / 1_000_000 * pricing["input"]
-        + output_tokens / 1_000_000 * pricing["output"]
-        + cache_read / 1_000_000 * pricing["input"] * 0.1
-        + cache_write / 1_000_000 * pricing["input"] * 1.25
+    record["estimated_cost_usd"] = estimate_cost(
+        record["model"],
+        record["input_tokens"],
+        record["output_tokens"],
+        record["cache_read_tokens"],
+        record["cache_write_tokens"],
     )
-    return round(cost, 6)
+
+    # Extract assistant text preview
+    content = body.get("content", [])
+    text_parts, tool_calls = [], []
+    for block in content:
+        if isinstance(block, dict):
+            if block.get("type") == "text":
+                text_parts.append(block.get("text", ""))
+            elif block.get("type") == "tool_use":
+                tool_calls.append(block.get("name", ""))
+
+    record["assistant_msg_preview"] = " ".join(text_parts)[:300].replace("\n", " ").replace(",", ";")
+
+    if tool_calls:
+        existing = json.loads(record.get("tool_calls", "[]"))
+        record["tool_calls"] = json.dumps(list(set(existing + tool_calls)))
+        record["tool_call_count"] = len(json.loads(record["tool_calls"]))
+
+    return record
+
+
+def parse_sse_response(raw: str, record: dict) -> dict:
+    """Parse Server-Sent Events streaming response and populate record fields.
+
+    Args:
+        raw: Raw SSE response text.
+        record: Mutable record dict to populate.
+
+    Returns:
+        Updated record dict.
+    """
+    input_tok = output_tok = cache_read = cache_write = 0
+    text_chunks, tool_calls = [], []
+    stop_reason = ""
+
+    for line in raw.split("\n"):
+        if not line.startswith("data: "):
+            continue
+        data_str = line[6:].strip()
+        if data_str in ("[DONE]", ""):
+            continue
+        try:
+            event = json.loads(data_str)
+            etype = event.get("type", "")
+
+            if etype == "message_start":
+                msg = event.get("message", {})
+                usage = msg.get("usage", {})
+                input_tok += usage.get("input_tokens", 0)
+                cache_read += usage.get("cache_read_input_tokens", 0)
+                cache_write += usage.get("cache_creation_input_tokens", 0)
+                record["model"] = record["model"] or msg.get("model", "")
+
+            elif etype == "content_block_start":
+                block = event.get("content_block", {})
+                if block.get("type") == "tool_use":
+                    tool_calls.append(block.get("name", ""))
+
+            elif etype == "content_block_delta":
+                delta = event.get("delta", {})
+                if delta.get("type") == "text_delta":
+                    text_chunks.append(delta.get("text", ""))
+
+            elif etype == "message_delta":
+                usage = event.get("usage", {})
+                output_tok += usage.get("output_tokens", 0)
+                stop_reason = event.get("delta", {}).get("stop_reason", "")
+
+            elif etype == "message_stop":
+                pass
+
+        except json.JSONDecodeError:
+            continue
+
+    record["input_tokens"] = input_tok
+    record["output_tokens"] = output_tok
+    record["cache_read_tokens"] = cache_read
+    record["cache_write_tokens"] = cache_write
+    record["stop_reason"] = stop_reason
+    record["stream"] = "true"
+
+    record["estimated_cost_usd"] = estimate_cost(record["model"], input_tok, output_tok, cache_read, cache_write)
+
+    if text_chunks:
+        record["assistant_msg_preview"] = "".join(text_chunks)[:300].replace("\n", " ").replace(",", ";")
+
+    if tool_calls:
+        existing = json.loads(record.get("tool_calls", "[]"))
+        record["tool_calls"] = json.dumps(list(set(existing + tool_calls)))
+        record["tool_call_count"] = len(json.loads(record["tool_calls"]))
+
+    return record
 
 
 def get_csv_path() -> Path:
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    session_dir = get_session_dir()
+    session_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return SESSION_DIR / f"claude_watch_{ts}.csv"
+    return session_dir / f"claude_watch_{ts}.csv"
 
 
 # ─────────────────────────────────────────────
@@ -342,7 +375,7 @@ try:
             if "api.anthropic.com" in host and flow.request.method == "POST":
                 try:
                     body = json.loads(flow.request.content)
-                    record = self._parse_request_body(body, record)
+                    record = parse_request_body(body, record)
                     record["raw_request_hash"] = hashlib.sha256(flow.request.content).hexdigest()[:12]
                 except Exception:
                     pass
@@ -366,214 +399,24 @@ try:
                     # Handle streamed responses (SSE)
                     raw = flow.response.content.decode("utf-8", errors="replace")
                     if raw.startswith("data:"):
-                        record = self._parse_sse_response(raw, record)
+                        record = parse_sse_response(raw, record)
                     else:
                         body = json.loads(raw)
-                        record = self._parse_response_body(body, record)
+                        record = parse_response_body(body, record)
                 except Exception:
                     pass
 
             self._write_row(record)
             self._print_turn(record)
 
-        def _parse_request_body(self, body: dict, record: dict) -> dict:
-            record["model"] = body.get("model", "")
-            record["stream"] = str(body.get("stream", False)).lower()
-
-            messages = body.get("messages", [])
-            record["num_messages"] = len(messages)
-
-            # System prompt length
-            system = body.get("system", "")
-            if isinstance(system, list):
-                system = " ".join(b.get("text", "") for b in system if isinstance(b, dict))
-            record["system_prompt_chars"] = len(system)
-
-            # Scan full request for sensitive patterns
-            full_text = json.dumps(body)
-            found = scan_sensitive(full_text)
-            record["sensitive_patterns"] = ",".join(found)
-            record["sensitive_pattern_count"] = len(found)
-
-            # Analyze each message
-            tool_calls, bash_cmds, files_read, files_written, urls = [], [], [], [], []
-            content_types = set()
-            last_user_text = ""
-
-            for msg in messages:
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-
-                if isinstance(content, str):
-                    content_types.add("text")
-                    if role == "user":
-                        last_user_text = content
-                elif isinstance(content, list):
-                    for block in content:
-                        if not isinstance(block, dict):
-                            continue
-                        btype = block.get("type", "")
-                        content_types.add(btype)
-
-                        if btype == "tool_use":
-                            name = block.get("name", "")
-                            tool_calls.append(name)
-                            inp = block.get("input", {})
-                            inp_str = json.dumps(inp)
-
-                            # Bash command extraction
-                            if name == "bash":
-                                cmd = inp.get("command", inp.get("cmd", ""))
-                                if cmd:
-                                    bash_cmds.append(cmd[:200])
-
-                            # File path extraction
-                            if name in ("str_replace_editor", "write_file", "create_file", "file_editor"):
-                                fp = inp.get("path", inp.get("file_path", ""))
-                                if fp:
-                                    files_written.append(fp)
-                            elif name in ("read_file", "view"):
-                                fp = inp.get("path", inp.get("file_path", ""))
-                                if fp:
-                                    files_read.append(fp)
-
-                            # URL extraction
-                            urls.extend(extract_urls(inp_str))
-
-                            # File paths from bash commands
-                            if name == "bash":
-                                cmd = inp.get("command", "")
-                                files_read.extend(extract_file_paths(cmd))
-
-                        elif btype == "tool_result":
-                            result_content = block.get("content", "")
-                            if isinstance(result_content, list):
-                                result_content = json.dumps(result_content)
-                            urls.extend(extract_urls(str(result_content)))
-
-                        elif btype == "text":
-                            if role == "user":
-                                last_user_text = block.get("text", "")
-
-            record["last_user_msg_preview"] = last_user_text[:300].replace("\n", " ").replace(",", ";")
-            record["tool_calls"] = json.dumps(list(set(tool_calls)))
-            record["tool_call_count"] = len(tool_calls)
-            record["bash_commands"] = json.dumps(bash_cmds[:10])
-            record["files_read"] = json.dumps(list(set(files_read))[:20])
-            record["files_written"] = json.dumps(list(set(files_written))[:20])
-            record["urls_fetched"] = json.dumps(list(set(urls))[:20])
-            record["content_types_sent"] = ",".join(sorted(content_types))
-
-            return record
-
-        def _parse_response_body(self, body: dict, record: dict) -> dict:
-            usage = body.get("usage", {})
-            record["input_tokens"] = usage.get("input_tokens", 0)
-            record["output_tokens"] = usage.get("output_tokens", 0)
-            record["cache_read_tokens"] = usage.get("cache_read_input_tokens", 0)
-            record["cache_write_tokens"] = usage.get("cache_creation_input_tokens", 0)
-            record["stop_reason"] = body.get("stop_reason", "")
-            record["model"] = record["model"] or body.get("model", "")
-
-            record["estimated_cost_usd"] = estimate_cost(
-                record["model"],
-                record["input_tokens"],
-                record["output_tokens"],
-                record["cache_read_tokens"],
-                record["cache_write_tokens"],
-            )
-
-            # Extract assistant text preview
-            content = body.get("content", [])
-            text_parts, tool_calls = [], []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                    elif block.get("type") == "tool_use":
-                        tool_calls.append(block.get("name", ""))
-
-            record["assistant_msg_preview"] = " ".join(text_parts)[:300].replace("\n", " ").replace(",", ";")
-
-            if tool_calls:
-                existing = json.loads(record.get("tool_calls", "[]"))
-                record["tool_calls"] = json.dumps(list(set(existing + tool_calls)))
-                record["tool_call_count"] = len(json.loads(record["tool_calls"]))
-
-            return record
-
-        def _parse_sse_response(self, raw: str, record: dict) -> dict:
-            """Parse Server-Sent Events streaming response."""
-            input_tok = output_tok = cache_read = cache_write = 0
-            text_chunks, tool_calls = [], []
-            stop_reason = ""
-
-            for line in raw.split("\n"):
-                if not line.startswith("data: "):
-                    continue
-                data_str = line[6:].strip()
-                if data_str in ("[DONE]", ""):
-                    continue
-                try:
-                    event = json.loads(data_str)
-                    etype = event.get("type", "")
-
-                    if etype == "message_start":
-                        msg = event.get("message", {})
-                        usage = msg.get("usage", {})
-                        input_tok += usage.get("input_tokens", 0)
-                        cache_read += usage.get("cache_read_input_tokens", 0)
-                        cache_write += usage.get("cache_creation_input_tokens", 0)
-                        record["model"] = record["model"] or msg.get("model", "")
-
-                    elif etype == "content_block_start":
-                        block = event.get("content_block", {})
-                        if block.get("type") == "tool_use":
-                            tool_calls.append(block.get("name", ""))
-
-                    elif etype == "content_block_delta":
-                        delta = event.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            text_chunks.append(delta.get("text", ""))
-
-                    elif etype == "message_delta":
-                        usage = event.get("usage", {})
-                        output_tok += usage.get("output_tokens", 0)
-                        stop_reason = event.get("delta", {}).get("stop_reason", "")
-
-                    elif etype == "message_stop":
-                        pass
-
-                except json.JSONDecodeError:
-                    continue
-
-            record["input_tokens"] = input_tok
-            record["output_tokens"] = output_tok
-            record["cache_read_tokens"] = cache_read
-            record["cache_write_tokens"] = cache_write
-            record["stop_reason"] = stop_reason
-            record["stream"] = "true"
-
-            record["estimated_cost_usd"] = estimate_cost(
-                record["model"], input_tok, output_tok, cache_read, cache_write
-            )
-
-            if text_chunks:
-                record["assistant_msg_preview"] = "".join(text_chunks)[:300].replace("\n", " ").replace(",", ";")
-
-            if tool_calls:
-                existing = json.loads(record.get("tool_calls", "[]"))
-                record["tool_calls"] = json.dumps(list(set(existing + tool_calls)))
-                record["tool_call_count"] = len(json.loads(record["tool_calls"]))
-
-            return record
-
         def _write_row(self, record: dict):
-            # Remove any internal keys
+            # CSV write (primary)
             row = {k: record.get(k, "") for k in CSV_COLUMNS}
             with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
                 writer.writerow(row)
+            # SQLite dual-write (best-effort, non-fatal)
+            insert_api_call(get_db_path(), record)
 
         def _print_turn(self, record: dict):
             svc = record.get("destination_service", "")
@@ -714,12 +557,13 @@ def run_setup():
         print("   📋 Windows: Import cert to Trusted Root CAs via certmgr.msc")
 
     # Print launch instructions
+    session_dir = get_session_dir()
     print("\n" + "=" * 50)
     print("✅ Setup complete!\n")
     print("📡 TO START MONITORING:")
     print("   claude-watch --start\n")
     print("📁 Captures saved to:")
-    print(f"   {SESSION_DIR}\n")
+    print(f"   {session_dir}\n")
     print("📊 TO ANALYZE / VISUALIZE:")
     print("   claude-watch --analyze        # terminal summary")
     print("   claude-watch --plot            # matplotlib PNG dashboard")
@@ -731,29 +575,32 @@ def run_setup():
 def run_start():
     """Launch mitmproxy with the claude_watch addon."""
     script_path = Path(__file__).resolve()
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    session_dir = get_session_dir()
+    output_dir = get_output_dir()
+    proxy_port = get_proxy_port()
+    session_dir.mkdir(parents=True, exist_ok=True)
 
     # Write env file for easy sourcing
-    env_file = OUTPUT_DIR / "proxy_env.sh"
+    env_file = output_dir / "proxy_env.sh"
     env_file.write_text(f"""#!/bin/bash
 # Source this file before running Claude Code:
 # source ~/claude_watch_output/proxy_env.sh
 
-export HTTPS_PROXY=http://127.0.0.1:{PROXY_PORT}
-export HTTP_PROXY=http://127.0.0.1:{PROXY_PORT}
-export ALL_PROXY=http://127.0.0.1:{PROXY_PORT}
+export HTTPS_PROXY=http://127.0.0.1:{proxy_port}
+export HTTP_PROXY=http://127.0.0.1:{proxy_port}
+export ALL_PROXY=http://127.0.0.1:{proxy_port}
 export NODE_EXTRA_CA_CERTS="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
 export SSL_CERT_FILE="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
 export REQUESTS_CA_BUNDLE="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
 # NODE_TLS_REJECT_UNAUTHORIZED=0  # only if cert trust fails
 
-echo "🔭 Claude Watch proxy active on port {PROXY_PORT}"
+echo "🔭 Claude Watch proxy active on port {proxy_port}"
 echo "   Run: claude"
 """)
 
     print("\n🔭 Claude Watch")
     print("=" * 50)
-    print(f"\n📡 Starting proxy on port {PROXY_PORT}...")
+    print(f"\n📡 Starting proxy on port {proxy_port}...")
     print("\n🖥️  In ANOTHER terminal, run:")
     print(f"   source {env_file}")
     print("   claude\n")
@@ -763,7 +610,7 @@ echo "   Run: claude"
     cmd = [
         "mitmdump",
         "--listen-port",
-        str(PROXY_PORT),
+        str(proxy_port),
         "--ssl-insecure",
         "-s",
         str(script_path),
@@ -781,7 +628,7 @@ echo "   Run: claude"
 
 def run_analyze(sessions_dir: Optional[str] = None):
     """Quick terminal analysis of latest CSV session."""
-    search_dir = Path(sessions_dir) if sessions_dir else SESSION_DIR
+    search_dir = Path(sessions_dir) if sessions_dir else get_session_dir()
 
     csvs = sorted(search_dir.glob("claude_watch_*.csv"), key=os.path.getmtime)
     if not csvs:
@@ -856,7 +703,7 @@ def run_analyze(sessions_dir: Optional[str] = None):
 
 def _load_latest_csv(sessions_dir: Optional[str] = None) -> tuple[Optional[Path], list[dict]]:
     """Load the latest CSV file and return (path, rows)."""
-    search_dir = Path(sessions_dir) if sessions_dir else SESSION_DIR
+    search_dir = Path(sessions_dir) if sessions_dir else get_session_dir()
     csvs = sorted(search_dir.glob("claude_watch_*.csv"), key=os.path.getmtime)
     if not csvs:
         print(f"No CSV files found in {search_dir}")
@@ -1192,7 +1039,7 @@ def run_plot(sessions_dir: Optional[str] = None):
     )
 
     # Save
-    PLOT_DIR = OUTPUT_DIR / "plots"
+    PLOT_DIR = get_output_dir() / "plots"
     PLOT_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     plot_path = PLOT_DIR / f"dashboard_{ts}.png"
@@ -1215,8 +1062,6 @@ def run_plot(sessions_dir: Optional[str] = None):
 # LIVE WEB DASHBOARD (--dashboard)
 # ─────────────────────────────────────────────
 
-DASHBOARD_PORT = 9081
-
 
 def run_dashboard(sessions_dir: Optional[str] = None):
     """Launch a live web dashboard to explore captured CSV data."""
@@ -1228,6 +1073,8 @@ def run_dashboard(sessions_dir: Optional[str] = None):
     if not rows:
         print("No data for dashboard. Run monitoring first or provide a CSV.")
         return
+
+    dashboard_port = get_dashboard_port()
 
     class DashboardHandler(http.server.BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -1255,17 +1102,20 @@ def run_dashboard(sessions_dir: Optional[str] = None):
     print("\nClaude Watch Dashboard")
     print("=" * 50)
     print(f"CSV: {latest.name} ({len(rows)} rows)")
-    print(f"Open: http://localhost:{DASHBOARD_PORT}")
+    print(f"Open: http://localhost:{dashboard_port}")
     print("Press Ctrl+C to stop\n")
 
     import platform
 
     if platform.system() == "Darwin":
         threading.Timer(
-            1.5, lambda: subprocess.run(["open", f"http://localhost:{DASHBOARD_PORT}"], check=False)
+            1.5, lambda: subprocess.run(["open", f"http://localhost:{dashboard_port}"], check=False)
         ).start()
 
-    server = http.server.HTTPServer(("0.0.0.0", DASHBOARD_PORT), DashboardHandler)
+    from claude_monitoring.config import get_bind_address
+
+    bind_addr = get_bind_address()
+    server = http.server.HTTPServer((bind_addr, dashboard_port), DashboardHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1287,7 +1137,8 @@ def _dashboard_html() -> str:
 # PROCESS SCANNER (--scan)
 # ─────────────────────────────────────────────
 
-AI_PROCESS_PATTERNS = {
+# Process patterns for --scan (display-friendly names for each pattern)
+_SCAN_PROCESS_PATTERNS = {
     "claude": "Claude Code CLI",
     "anthropic": "Anthropic SDK",
     "openai": "OpenAI SDK/CLI",
@@ -1334,7 +1185,7 @@ def run_scan():
         mem = parts[3]
         cmd = parts[10]
 
-        for pattern, name in AI_PROCESS_PATTERNS.items():
+        for pattern, name in _SCAN_PROCESS_PATTERNS.items():
             if pattern.lower() in cmd.lower():
                 found.append({"pid": pid, "cpu": cpu, "mem": mem, "name": name, "pattern": pattern, "cmd": cmd[:120]})
                 break
@@ -1406,8 +1257,9 @@ def run_generate_test():
     """Generate a synthetic test CSV with realistic data."""
     import random
 
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    csv_path = SESSION_DIR / "claude_watch_test.csv"
+    session_dir = get_session_dir()
+    session_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = session_dir / "claude_watch_test.csv"
 
     session_id = str(uuid.uuid4())[:8]
     base_time = datetime.now(timezone.utc)
@@ -1550,6 +1402,145 @@ def run_generate_test():
 
 
 # ─────────────────────────────────────────────
+# CLI HARDENING COMMANDS
+# ─────────────────────────────────────────────
+
+
+def run_verify():
+    """Run health checks for proxy setup."""
+    import shutil
+    import socket
+
+    from claude_monitoring.config import CONFIG_SEARCH_PATHS, get_cert_path
+
+    checks = []
+
+    # Check 1: mitmproxy installed
+    mitm = shutil.which("mitmdump")
+    if mitm:
+        checks.append(("mitmproxy installed", True, mitm))
+    else:
+        checks.append(("mitmproxy installed", False, "Run: pip install mitmproxy"))
+
+    # Check 2: CA cert exists
+    cert = get_cert_path()
+    checks.append(("CA cert exists", cert.exists(), str(cert)))
+
+    # Check 3: Port available
+    port = get_proxy_port()
+    try:
+        s = socket.socket()
+        s.bind(("127.0.0.1", port))
+        s.close()
+        checks.append((f"Port {port} available", True, ""))
+    except OSError:
+        checks.append((f"Port {port} available", False, "Port in use"))
+
+    # Check 4: monitor.db exists
+    db = get_db_path()
+    checks.append(("monitor.db exists", db.exists(), str(db)))
+
+    # Check 5: Config file
+    config_found = any(p.exists() for p in CONFIG_SEARCH_PATHS)
+    checks.append(("Config file found", config_found, "Run: ai-monitor --init-config"))
+
+    print("\nClaude Watch — Setup Verification")
+    print("=" * 50)
+    for name, ok, detail in checks:
+        icon = "OK" if ok else "FAIL"
+        print(f"  [{icon}] {name}")
+        if detail and not ok:
+            print(f"         {detail}")
+
+    all_ok = all(ok for _, ok, _ in checks)
+    if all_ok:
+        print("\nAll checks passed! Ready to start.")
+    else:
+        print("\nSome checks failed. Fix the issues above.")
+    return all_ok
+
+
+def run_configure(agent):
+    """Configure proxy for an AI agent."""
+    if agent == "list":
+        print("\nSupported agents:")
+        agents = {
+            "claude_code": ("~/.zshrc or ~/.bashrc", "shell_rc"),
+            "cursor": ("VS Code settings.json", "app_config"),
+            "aider": ("~/.zshrc or ~/.bashrc", "shell_rc"),
+        }
+        for name, (location, _method) in agents.items():
+            print(f"  {name:<15} {location}")
+        return
+
+    port = get_proxy_port()
+    marker = "# [ai-runtime-monitor]"
+    proxy_lines = f"""
+{marker} — START
+export HTTPS_PROXY=http://127.0.0.1:{port}
+export HTTP_PROXY=http://127.0.0.1:{port}
+export NODE_EXTRA_CA_CERTS="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
+{marker} — END
+"""
+
+    if agent in ("claude_code", "aider"):
+        # Find shell profile
+        zshrc = Path.home() / ".zshrc"
+        bashrc = Path.home() / ".bashrc"
+        target = zshrc if zshrc.exists() else bashrc
+
+        # Check if already configured
+        content = target.read_text() if target.exists() else ""
+        if marker in content:
+            print(f"Already configured in {target}")
+            return
+
+        # Backup and append
+        if target.exists():
+            import shutil
+
+            shutil.copy(target, str(target) + ".bak")
+
+        with open(target, "a") as f:
+            f.write(proxy_lines)
+
+        print(f"Proxy configured in {target}")
+        print(f"Restart your shell or run: source {target}")
+    else:
+        print(f"Agent '{agent}' configuration not yet supported.")
+
+
+def run_unconfigure(agent="all"):
+    """Remove proxy config from shell profiles."""
+    marker = "# [ai-runtime-monitor]"
+    profiles = [Path.home() / ".zshrc", Path.home() / ".bashrc"]
+
+    for profile in profiles:
+        if not profile.exists():
+            continue
+        content = profile.read_text()
+        if marker not in content:
+            continue
+
+        # Remove lines between markers
+        lines = content.split("\n")
+        new_lines = []
+        skip = False
+        for line in lines:
+            if f"{marker} — START" in line:
+                skip = True
+                continue
+            if f"{marker} — END" in line:
+                skip = False
+                continue
+            if not skip:
+                new_lines.append(line)
+
+        profile.write_text("\n".join(new_lines))
+        print(f"Removed proxy config from {profile}")
+
+
+# ─────────────────────────────────────────────
 # ENTRYPOINT
 # ─────────────────────────────────────────────
 
@@ -1568,6 +1559,10 @@ Examples:
   claude-watch --dashboard       # Launch live web dashboard
   claude-watch --scan            # Detect running AI agents
   claude-watch --generate-test   # Create test CSV data
+  claude-watch --verify          # Verify proxy setup
+  claude-watch --configure       # List supported agents
+  claude-watch --configure claude_code  # Configure proxy for Claude Code
+  claude-watch --unconfigure     # Remove proxy config from shell
         """,
     )
     parser.add_argument("--setup", action="store_true", help="Install deps, trust cert")
@@ -1578,6 +1573,11 @@ Examples:
     parser.add_argument("--scan", action="store_true", help="Scan for AI processes")
     parser.add_argument("--generate-test", action="store_true", help="Generate synthetic test CSV")
     parser.add_argument("--dir", type=str, default=None, help="Session dir for --analyze/--plot/--dashboard")
+    parser.add_argument("--verify", action="store_true", help="Verify proxy setup (health checks)")
+    parser.add_argument(
+        "--configure", nargs="?", const="list", help="Configure proxy for an AI agent (claude_code, cursor, aider)"
+    )
+    parser.add_argument("--unconfigure", action="store_true", help="Remove proxy config from shell profiles")
 
     args = parser.parse_args()
 
@@ -1595,6 +1595,12 @@ Examples:
         run_scan()
     elif args.generate_test:
         run_generate_test()
+    elif args.verify:
+        run_verify()
+    elif args.configure is not None:
+        run_configure(args.configure)
+    elif args.unconfigure:
+        run_unconfigure()
     else:
         parser.print_help()
 
