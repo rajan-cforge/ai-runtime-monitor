@@ -56,6 +56,7 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
 .session-item .title { font-size:13px; font-weight:500; color:var(--text); line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 .session-item .meta { font-size:11px; color:var(--text2); margin-top:4px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
 .session-item .meta .project-badge { background:var(--surface2); border:1px solid var(--border); border-radius:3px; padding:1px 5px; font-size:10px; color:var(--cyan); }
+.session-item .project-path { font-size:11px; color:var(--text2); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .session-item .stats-row { display:flex; gap:10px; margin-top:4px; font-size:11px; }
 .session-item .stats-row span { color:var(--text2); }
 .session-item .service-badge { display:inline-block; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:600; background:#2d1f3d; color:var(--purple); }
@@ -498,6 +499,18 @@ function projectName(cwd) {
   const parts = cwd.replace(/\\/g,'/').split('/').filter(Boolean);
   return parts[parts.length-1] || '';
 }
+function shortPath(cwd) {
+  if (!cwd) return '';
+  var p = cwd.replace(/\\/g,'/');
+  var home = '/Users/';
+  var idx = p.indexOf(home);
+  if (idx === 0) {
+    var rest = p.substring(home.length);
+    var slash = rest.indexOf('/');
+    p = '~' + (slash >= 0 ? rest.substring(slash) : '');
+  }
+  return p;
+}
 
 // Escape HTML
 function esc(s) {
@@ -581,10 +594,12 @@ async function loadSessions() {
         ? "loadBrowserSessionDetail('" + (s.conversation_id || s.session_id) + "')"
         : "loadSessionDetail('" + s.session_id + "')";
 
+      const cwdShort = isBrowser ? '' : shortPath(s.cwd);
       return '<div class="' + itemClass + '" data-id="'+s.session_id+'" onclick="' + clickFn + '">'
         + '<div class="title">'
         + (isBrowser ? '<span class="service-badge" style="background:#2d1f3d;color:var(--purple)">' + esc(s.service || s.model) + '</span> ' : '')
         + esc(title) + '</div>'
+        + (cwdShort ? '<div class="project-path">' + esc(cwdShort) + '</div>' : '')
         + '<div class="meta">'
         + '<span>' + (isBrowser ? esc(s.service || '') : (s.model||'unknown').replace('claude-','')) + '</span>'
         + '<span style="color:var(--text2)">' + (isBrowser ? (s.conversation_id||'').substring(0,12) : s.session_id.substring(0,8)) + '</span>'
@@ -1213,7 +1228,7 @@ async function openDeepDive(sessionId, jumpToTurn) {
 
     renderTurnRail();
     document.getElementById('deepdive-overlay').classList.add('open');
-    selectTurn(jumpToTurn || 1);
+    selectTurn(jumpToTurn || ddTurns.length);
   } catch(e) { console.error('Deep dive error:', e); }
 }
 
@@ -1386,7 +1401,7 @@ async function loadTraffic(reset) {
     document.getElementById('traffic-total').textContent = fmtNum(stats.total_calls || 0);
     document.getElementById('traffic-cost').textContent = '$' + (stats.total_cost || 0).toFixed(2);
     document.getElementById('traffic-latency').textContent = (stats.avg_latency || 0).toFixed(0) + 'ms';
-    document.getElementById('traffic-sensitive').textContent = stats.sensitive_calls || 0;
+    document.getElementById('traffic-sensitive').textContent = stats.sensitive_calls || stats.total_sensitive || 0;
 
     // Proxy status banner
     const banner = document.getElementById('traffic-banner');
@@ -1423,23 +1438,35 @@ function renderTrafficTable() {
   }
 
   tbody.innerHTML = trafficData.map(function(c, idx) {
-    const statusColor = (c.status || '').toString().startsWith('2') || c.status === 'ok' ? 'var(--green)' : c.status === 'error' ? 'var(--red)' : 'var(--text2)';
-    const hasSensitive = c.sensitive_patterns && c.sensitive_patterns.length > 0;
+    // Normalize field names (DB uses http_status/destination_service/estimated_cost_usd/latency_ms)
+    var status = String(c.http_status || c.status || '');
+    var service = c.destination_service || c.service || '-';
+    var cost = c.estimated_cost_usd || c.cost || 0;
+    var latency = c.latency_ms || c.latency || 0;
+    var tools = c.tool_calls;
+    if (typeof tools === 'string') { try { tools = JSON.parse(tools); } catch(e) { tools = []; } }
+    if (!Array.isArray(tools)) tools = [];
+    var sensitive = c.sensitive_patterns;
+    if (typeof sensitive === 'string' && sensitive) { try { sensitive = JSON.parse(sensitive); } catch(e) { sensitive = sensitive.split(',').map(function(s){return s.trim()}).filter(Boolean); } }
+    if (!Array.isArray(sensitive)) sensitive = [];
+
+    const statusColor = status.startsWith('2') || status === 'ok' ? 'var(--green)' : status === 'error' || status.startsWith('4') || status.startsWith('5') ? 'var(--red)' : 'var(--text2)';
+    const hasSensitive = sensitive.length > 0;
     const mainRow = '<tr class="expandable" onclick="toggleTrafficDetail(' + idx + ')">'
       + '<td>' + fmtTimestamp(c.timestamp) + '</td>'
-      + '<td>' + esc(c.service || '-') + '</td>'
+      + '<td>' + esc(service) + '</td>'
       + '<td>' + esc((c.model || '-').replace('claude-', '')) + '</td>'
       + '<td>' + fmtNum(c.input_tokens || 0) + '</td>'
       + '<td>' + fmtNum(c.output_tokens || 0) + '</td>'
-      + '<td>$' + (c.cost || 0).toFixed(4) + '</td>'
-      + '<td>' + (c.latency || 0).toFixed(0) + 'ms</td>'
-      + '<td><span style="color:' + statusColor + '">' + esc(c.status || '-') + '</span>'
+      + '<td>$' + cost.toFixed(4) + '</td>'
+      + '<td>' + latency.toFixed(0) + 'ms</td>'
+      + '<td><span style="color:' + statusColor + '">' + esc(status || '-') + '</span>'
       + (hasSensitive ? ' <span style="color:var(--red)">&#x26a0;</span>' : '') + '</td>'
       + '</tr>';
 
-    const toolsList = (c.tool_calls || []).map(function(t) { return '<span class="badge" style="background:var(--surface2);color:var(--orange);margin:2px">' + esc(typeof t === 'string' ? t : t.name || t) + '</span>'; }).join('') || '<span style="color:var(--text2)">None</span>';
+    const toolsList = tools.map(function(t) { return '<span class="badge" style="background:var(--surface2);color:var(--orange);margin:2px">' + esc(typeof t === 'string' ? t : t.name || t) + '</span>'; }).join('') || '<span style="color:var(--text2)">None</span>';
     const sensitiveHtml = hasSensitive
-      ? '<div class="sensitive-flag">&#x26a0; ' + esc(c.sensitive_patterns.join(', ')) + '</div>'
+      ? '<div class="sensitive-flag">&#x26a0; ' + esc(sensitive.join(', ')) + '</div>'
       : '<span style="color:var(--text2)">None detected</span>';
     const sessionLink = c.session_id
       ? '<a style="color:var(--cyan);cursor:pointer;text-decoration:none" onclick="event.stopPropagation();openDeepDive(\'' + c.session_id + '\')">' + esc(c.session_id.substring(0, 12)) + '...</a>'
