@@ -138,7 +138,7 @@ class TestLoadConfigDefaults:
 
     def test_has_all_top_level_sections(self, tmp_path):
         cfg = config.load_config(str(tmp_path / "nonexistent.toml"))
-        assert set(cfg.keys()) == {"server", "paths", "proxy"}
+        assert set(cfg.keys()) == {"server", "paths", "proxy", "mcp"}
 
 
 # ─────────────────────────────────────────────────────────────

@@ -5,7 +5,7 @@ from claude_monitoring.utils import scan_sensitive
 
 class TestScanSensitive:
     def test_aws_key_detected(self):
-        text = "config: AKIAIOSFODNN7EXAMPLE"
+        text = "config: AKIAI44QH8DHBR3XYZAB"
         results = scan_sensitive(text)
         names = [r["name"] for r in results]
         assert "aws_key" in names
@@ -95,3 +95,32 @@ class TestScanSensitive:
         results = scan_sensitive(text)
         names = [r["name"] for r in results]
         assert "slack_webhook" in names
+
+
+class TestKnownExampleFiltering:
+    """Tests for _is_known_example() filtering of known test/example secrets."""
+
+    def test_known_aws_example_is_detected(self):
+        from claude_monitoring.utils import _is_known_example
+
+        assert _is_known_example("aws_key", "found AKIAIOSFODNN7EXAMPLE in code") is True
+
+    def test_known_aws_example_variant(self):
+        from claude_monitoring.utils import _is_known_example
+
+        assert _is_known_example("aws_key", "key=AKIAI44QH8DHBEXAMPLE") is True
+
+    def test_real_aws_key_not_filtered(self):
+        from claude_monitoring.utils import _is_known_example
+
+        assert _is_known_example("aws_key", "key=AKIAI44QH8DHBR3XYZAB") is False
+
+    def test_unknown_pattern_not_filtered(self):
+        from claude_monitoring.utils import _is_known_example
+
+        assert _is_known_example("nonexistent_pattern", "AKIAIOSFODNN7EXAMPLE") is False
+
+    def test_empty_text_not_filtered(self):
+        from claude_monitoring.utils import _is_known_example
+
+        assert _is_known_example("aws_key", "") is False

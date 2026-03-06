@@ -245,22 +245,26 @@ SENSITIVE_PATTERNS = {
 # Severity ordering for display
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
+# Known example/test secrets that should never trigger alerts
+KNOWN_EXAMPLE_SECRETS = {
+    "aws_key": {
+        "AKIAIOSFODNN7EXAMPLE",
+        "AKIAI44QH8DHBEXAMPLE",
+        "AKIAEXAMPLEKEYID1234",
+    },
+    "aws_secret": set(),
+    "github_token": set(),
+    "anthropic_key": set(),
+    "openai_key": set(),
+    "stripe_key": set(),
+}
+
 # ─────────────────────────────────────────────────────────────
-# Model Pricing (per 1M tokens)
+# MCP Server Monitoring
 # ─────────────────────────────────────────────────────────────
 
-MODEL_PRICING = {
-    "claude-opus-4": {"input": 15.00, "output": 75.00},
-    "claude-sonnet-4": {"input": 3.00, "output": 15.00},
-    "claude-haiku-4": {"input": 0.80, "output": 4.00},
-    "claude-opus-4-5": {"input": 15.00, "output": 75.00},
-    "claude-sonnet-4-5": {"input": 3.00, "output": 15.00},
-    "claude-haiku-4-5": {"input": 0.80, "output": 4.00},
-    "claude-3-5-sonnet": {"input": 3.00, "output": 15.00},
-    "claude-3-5-haiku": {"input": 0.80, "output": 4.00},
-    "claude-3-opus": {"input": 15.00, "output": 75.00},
-    "default": {"input": 3.00, "output": 15.00},
-}
+# Known/trusted MCP servers (user can extend via config)
+MCP_KNOWN_SERVERS: set[str] = set()
 
 # Subscription plan token limits (approximate monthly)
 PLAN_LIMITS = {

@@ -20,6 +20,8 @@ DEPENDENCIES:
 """
 
 import argparse
+import csv
+import io
 import json
 import os
 import shutil
@@ -48,7 +50,14 @@ except ImportError:
     Observer = None
     FileSystemEventHandler = object
 
-from claude_monitoring.config import get_bind_address, get_dashboard_port, get_db_path, get_output_dir
+from claude_monitoring.config import (
+    get_bind_address,
+    get_dashboard_port,
+    get_db_path,
+    get_mcp_known_servers,
+    get_output_dir,
+    is_mcp_alert_on_unknown,
+)
 from claude_monitoring.constants import (
     AI_HOSTS,
     ANTHROPIC_IP_PREFIXES,
@@ -58,7 +67,7 @@ from claude_monitoring.constants import (
     SEVERITY_ORDER,
 )
 from claude_monitoring.db import get_thread_db, init_db
-from claude_monitoring.utils import estimate_cost, is_ai_process, now_iso, scan_sensitive
+from claude_monitoring.utils import _is_known_example, is_ai_process, now_iso, scan_sensitive
 
 # ─────────────────────────────────────────────────────────────
 # SECTION 1: CONFIG & CONSTANTS
@@ -80,7 +89,7 @@ active_session_cwds = set()
 active_cwds_lock = threading.Lock()
 
 # Plan/subscription detection (populated on startup)
-plan_info = {"is_subscription": False, "plan_tier": "", "cost_label": "Total Cost"}
+plan_info = {"is_subscription": False, "plan_tier": ""}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -191,7 +200,7 @@ def compute_forecast(db):
 def detect_plan_info():
     """Detect Claude subscription plan from local config files."""
     global plan_info
-    info = {"is_subscription": False, "plan_tier": "", "cost_label": "Total Cost"}
+    info = {"is_subscription": False, "plan_tier": ""}
 
     # Check stats-cache.json for modelUsage costUSD
     stats_path = Path.home() / ".claude" / "stats-cache.json"
@@ -232,10 +241,6 @@ def detect_plan_info():
         # No API key file — likely subscription user
         info["is_subscription"] = True
 
-    if info["is_subscription"]:
-        tier = info.get("plan_tier", "")
-        info["cost_label"] = f"Plan: {tier}" if tier else "Subscription"
-
     plan_info = info
     return info
 
@@ -275,7 +280,7 @@ class JSONLSessionWatcher:
         except Exception:
             pass
 
-    def _update_session_stats(self, session_id, model=None, cost=0, input_tokens=0, output_tokens=0, is_turn=False):
+    def _update_session_stats(self, session_id, model=None, input_tokens=0, output_tokens=0, is_turn=False):
         """Update session aggregate statistics."""
         try:
             parts = ["last_activity=?"]
@@ -283,9 +288,6 @@ class JSONLSessionWatcher:
             if model:
                 parts.append("model=?")
                 vals.append(model)
-            if cost:
-                parts.append("total_cost=total_cost+?")
-                vals.append(cost)
             if input_tokens:
                 parts.append("total_input_tokens=total_input_tokens+?")
                 vals.append(input_tokens)
@@ -344,8 +346,11 @@ class JSONLSessionWatcher:
         elif event_type == "token_usage":
             inp = data.get("input_tokens", 0)
             out = data.get("output_tokens", 0)
-            cost = data.get("cost", 0)
-            return f"↑{inp}t ↓{out}t ${cost:.4f}"
+            return f"↑{inp}t ↓{out}t"
+        elif event_type == "mcp_call":
+            server = data.get("server", "?")
+            method = data.get("method", "?")
+            return f"MCP: {server}.{method}"
         elif event_type == "sensitive_data":
             sev = data.get("severity", "medium").upper()
             return f"ALERT [{sev}]: {', '.join(data.get('patterns', []))}"
@@ -509,7 +514,6 @@ class JSONLSessionWatcher:
         output_tokens = usage.get("output_tokens", 0)
         cache_read = usage.get("cache_read_input_tokens", 0)
         cache_write = usage.get("cache_creation_input_tokens", 0)
-        cost = estimate_cost(model, input_tokens, output_tokens, cache_read, cache_write)
 
         for block in content:
             if not isinstance(block, dict):
@@ -582,6 +586,41 @@ class JSONLSessionWatcher:
                 )
                 self._check_sensitive(json.dumps(tool_input, default=str), session_id, timestamp, f"tool:{tool_name}")
 
+                # MCP server detection: tool names like mcp__<server>__<method>
+                if tool_name.startswith("mcp__"):
+                    parts = tool_name.split("__", 2)
+                    mcp_server = parts[1] if len(parts) > 1 else "unknown"
+                    mcp_method = parts[2] if len(parts) > 2 else "unknown"
+                    self._store_event(
+                        timestamp,
+                        session_id,
+                        "mcp_call",
+                        "network",
+                        {
+                            "server": mcp_server,
+                            "method": mcp_method,
+                            "tool_name": tool_name,
+                            "input_preview": input_preview,
+                        },
+                    )
+                    # Alert on unknown MCP server
+                    if is_mcp_alert_on_unknown():
+                        known = set(get_mcp_known_servers())
+                        if known and mcp_server not in known:
+                            self._store_event(
+                                timestamp,
+                                session_id,
+                                "sensitive_data",
+                                "network",
+                                {
+                                    "patterns": [f"unknown_mcp_server:{mcp_server}"],
+                                    "severity": "high",
+                                    "categories": ["policy"],
+                                    "context": f"Unknown MCP server '{mcp_server}' called method '{mcp_method}'",
+                                    "snippet": tool_name,
+                                },
+                            )
+
         # Store token usage event
         if input_tokens or output_tokens:
             self._store_event(
@@ -595,12 +634,11 @@ class JSONLSessionWatcher:
                     "output_tokens": output_tokens,
                     "cache_read_tokens": cache_read,
                     "cache_write_tokens": cache_write,
-                    "cost": cost,
                     "stop_reason": stop_reason,
                 },
             )
             self._update_session_stats(
-                session_id, model=model, cost=cost, input_tokens=input_tokens, output_tokens=output_tokens
+                session_id, model=model, input_tokens=input_tokens, output_tokens=output_tokens
             )
 
     def _process_progress(self, record, session_id, timestamp):
@@ -626,24 +664,68 @@ class JSONLSessionWatcher:
         if not text:
             return
         matches = scan_sensitive(text)
-        if matches:
-            # Find highest severity
-            severity = min((m["severity"] for m in matches), key=lambda s: SEVERITY_ORDER.get(s, 99))
-            pattern_names = [m["name"] for m in matches]
-            categories = list(set(m["category"] for m in matches))
-            self._store_event(
-                timestamp,
-                session_id,
-                "sensitive_data",
-                "network",
-                {
-                    "patterns": pattern_names,
-                    "severity": severity,
-                    "categories": categories,
-                    "context": context,
-                    "snippet": text[:200],
-                },
-            )
+        if not matches:
+            return
+        # Filter out known example secrets
+        matches = [m for m in matches if not _is_known_example(m["name"], text)]
+        if not matches:
+            return
+        # Find highest severity
+        severity = min((m["severity"] for m in matches), key=lambda s: SEVERITY_ORDER.get(s, 99))
+        # Context-aware severity downgrade
+        severity = self._adjust_alert_severity(severity, context, text)
+        pattern_names = [m["name"] for m in matches]
+        categories = list(set(m["category"] for m in matches))
+        self._store_event(
+            timestamp,
+            session_id,
+            "sensitive_data",
+            "network",
+            {
+                "patterns": pattern_names,
+                "severity": severity,
+                "categories": categories,
+                "context": context,
+                "snippet": text[:200],
+            },
+        )
+
+    def _adjust_alert_severity(self, severity, context, text):
+        """Downgrade alert severity based on context to reduce false positives.
+
+        Rules:
+        - tool_result with /tests/ or /test_ path: downgrade to low
+        - tool_result with "EXAMPLE" near match: downgrade to low
+        - assistant_response discussing/analyzing code: downgrade to medium
+        - tool:Write with /tests/ path: downgrade to low
+        """
+        text_lower = text.lower() if text else ""
+
+        if context == "tool_result":
+            # Test file results
+            if "/tests/" in text or "/test_" in text or "test_" in text_lower:
+                return "low"
+            # Example patterns in tool output
+            if "EXAMPLE" in text or "example" in text_lower:
+                return "low"
+
+        elif context == "assistant_response":
+            # Assistant discussing security findings or analyzing code
+            analysis_indicators = [
+                "found", "detected", "contains", "appears to",
+                "security", "credential", "vulnerability", "leaked",
+                "should not", "remove", "rotate", "revoke",
+            ]
+            if any(indicator in text_lower for indicator in analysis_indicators):
+                if severity in ("critical", "high"):
+                    return "medium"
+
+        elif context and context.startswith("tool:"):
+            # Tool writes to test files
+            if "/tests/" in text or "/test_" in text:
+                return "low"
+
+        return severity
 
 
 class JSONLFileHandler(FileSystemEventHandler):
@@ -1215,6 +1297,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "/api/traffic": self._api_traffic,
             "/api/traffic/stats": self._api_traffic_stats,
             "/api/session_traffic": self._api_session_traffic,
+            "/api/mcp/stats": self._api_mcp_stats,
+            "/api/mcp/servers": self._api_mcp_servers,
+            "/api/insights": self._api_insights,
+            "/api/insights/projects": self._api_insights_projects,
+            "/api/insights/efficiency": self._api_insights_efficiency,
+            "/api/report": self._api_report,
         }
 
         # Match path prefixes for dynamic routes
@@ -1280,7 +1368,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         order = sort_map.get(sort, "last_activity DESC")
 
         if q:
-            sql = f"""SELECT session_id, start_time, cwd, model, total_cost,
+            sql = f"""SELECT session_id, start_time, cwd, model,
                           total_input_tokens, total_output_tokens, total_turns,
                           jsonl_path, last_activity, title
                    FROM sessions
@@ -1288,7 +1376,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                    ORDER BY {order} LIMIT ?"""  # nosec B608
             rows = db.execute(sql, (f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", limit)).fetchall()
         else:
-            sql = f"""SELECT session_id, start_time, cwd, model, total_cost,
+            sql = f"""SELECT session_id, start_time, cwd, model,
                           total_input_tokens, total_output_tokens, total_turns,
                           jsonl_path, last_activity, title
                    FROM sessions ORDER BY {order} LIMIT ?"""  # nosec B608
@@ -1347,7 +1435,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "model": rd["service"],
                         "service": rd["service"],
                         "cwd": "",
-                        "total_cost": 0,
                         "total_input_tokens": 0,
                         "total_output_tokens": 0,
                         "total_turns": rd["total_turns"],
@@ -1501,7 +1588,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         total_sessions = db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         total_events = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-        total_cost = db.execute("SELECT COALESCE(SUM(total_cost), 0) FROM sessions").fetchone()[0]
         total_input = db.execute("SELECT COALESCE(SUM(total_input_tokens), 0) FROM sessions").fetchone()[0]
         total_output = db.execute("SELECT COALESCE(SUM(total_output_tokens), 0) FROM sessions").fetchone()[0]
         total_alerts = db.execute("SELECT COUNT(*) FROM events WHERE event_type='sensitive_data'").fetchone()[0]
@@ -1525,8 +1611,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         token_timeline = db.execute(
             """SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
                       SUM(json_extract(data_json, '$.input_tokens')) as input_t,
-                      SUM(json_extract(data_json, '$.output_tokens')) as output_t,
-                      SUM(json_extract(data_json, '$.cost')) as cost
+                      SUM(json_extract(data_json, '$.output_tokens')) as output_t
                FROM events
                WHERE event_type='token_usage'
                  AND timestamp > datetime('now', '-24 hours')
@@ -1542,9 +1627,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         # Model usage
         model_usage = db.execute(
-            """SELECT model, COUNT(*) as sessions, SUM(total_cost) as cost
+            """SELECT model, COUNT(*) as sessions
                FROM sessions WHERE model IS NOT NULL AND model != ''
-               GROUP BY model ORDER BY cost DESC"""
+               GROUP BY model ORDER BY sessions DESC"""
         ).fetchall()
 
         # Browser AI stats
@@ -1582,7 +1667,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             {
                 "total_sessions": total_sessions,
                 "total_events": total_events,
-                "total_cost": round(total_cost, 4),
                 "total_input_tokens": total_input,
                 "total_output_tokens": total_output,
                 "total_alerts": total_alerts,
@@ -2032,6 +2116,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_csv(self, rows, filename):
+        """Send rows as CSV with download headers."""
+        if not rows:
+            body = b""
+        else:
+            output = io.StringIO()
+            writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: str(v) if v is not None else "" for k, v in row.items()})
+            body = output.getvalue().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _api_export(self, params):
         """Export data for SIEM integration."""
         export_type = params.get("type", ["sessions"])[0]
@@ -2046,7 +2148,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if export_type == "sessions":
             rows = db.execute(
-                """SELECT session_id, start_time, cwd, model, total_cost,
+                """SELECT session_id, start_time, cwd, model,
                           total_input_tokens, total_output_tokens, total_turns,
                           last_activity, title
                    FROM sessions ORDER BY last_activity DESC LIMIT ?""",
@@ -2120,11 +2222,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
             data = [dict(r) for r in rows]
             fname = f"ai_monitor_connections_{now_iso()[:10]}"
 
+        elif export_type == "traffic":
+            rows = db.execute(
+                """SELECT * FROM api_calls ORDER BY timestamp DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            data = [dict(r) for r in rows]
+            fname = f"ai_monitor_traffic_{now_iso()[:10]}"
+
         else:
             self._send_json({"error": f"Unknown export type: {export_type}"}, 400)
             return
 
-        if fmt == "ndjson":
+        if fmt == "csv":
+            self._send_csv(data, fname + ".csv")
+        elif fmt == "ndjson":
             self._send_ndjson(data, fname + ".ndjson")
         else:
             self._send_json_download(
@@ -2176,22 +2288,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             """SELECT COUNT(*) as total_calls,
                       COALESCE(SUM(input_tokens), 0) as total_input_tokens,
                       COALESCE(SUM(output_tokens), 0) as total_output_tokens,
-                      COALESCE(SUM(estimated_cost_usd), 0) as total_cost,
                       COALESCE(AVG(latency_ms), 0) as avg_latency,
                       COALESCE(SUM(sensitive_pattern_count), 0) as total_sensitive
                FROM api_calls"""
         ).fetchone()
 
         by_service = db.execute(
-            """SELECT destination_service, COUNT(*) as count,
-                      COALESCE(SUM(estimated_cost_usd), 0) as cost
+            """SELECT destination_service, COUNT(*) as count
                FROM api_calls GROUP BY destination_service
                ORDER BY count DESC"""
         ).fetchall()
 
         by_model = db.execute(
-            """SELECT model, COUNT(*) as count,
-                      COALESCE(SUM(estimated_cost_usd), 0) as cost
+            """SELECT model, COUNT(*) as count
                FROM api_calls WHERE model != '' GROUP BY model
                ORDER BY count DESC"""
         ).fetchall()
@@ -2201,7 +2310,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "total_calls": row["total_calls"],
                 "total_input_tokens": row["total_input_tokens"],
                 "total_output_tokens": row["total_output_tokens"],
-                "total_cost": round(row["total_cost"], 6),
                 "avg_latency": round(row["avg_latency"], 1),
                 "total_sensitive": row["total_sensitive"],
                 "by_service": [dict(r) for r in by_service],
@@ -2223,23 +2331,357 @@ class DashboardHandler(BaseHTTPRequestHandler):
             (session_id,),
         ).fetchall()
 
-        # Compute cumulative cost
-        calls = []
-        cumulative_cost = 0.0
-        for r in rows:
-            call = dict(r)
-            cumulative_cost += call.get("estimated_cost_usd", 0) or 0
-            call["cumulative_cost"] = round(cumulative_cost, 6)
-            calls.append(call)
+        calls = [dict(r) for r in rows]
 
         self._send_json(
             {
                 "session_id": session_id,
                 "calls": calls,
                 "total_calls": len(calls),
-                "total_cost": round(cumulative_cost, 6),
             }
         )
+
+
+    # ── MCP endpoints ────────────────────────────────────────────
+
+    def _api_mcp_stats(self, params):
+        """MCP server activity statistics from tool_use events."""
+        db = get_thread_db()
+        limit = int(params.get("limit", ["50"])[0])
+
+        # Query tool_use events with mcp__ prefix
+        rows = db.execute(
+            """SELECT e.id, e.timestamp, e.session_id, e.data_json
+               FROM events e
+               WHERE e.event_type = 'mcp_call'
+               ORDER BY e.id DESC LIMIT ?""",
+            (limit * 10,),
+        ).fetchall()
+
+        servers = {}
+        recent_calls = []
+        session_ids = set()
+
+        for r in rows:
+            try:
+                data = json.loads(r["data_json"]) if r["data_json"] else {}
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            server = data.get("server", "unknown")
+            method = data.get("method", "unknown")
+            session_ids.add(r["session_id"])
+
+            if server not in servers:
+                servers[server] = {"server": server, "call_count": 0, "methods": set(), "sessions": set()}
+            servers[server]["call_count"] += 1
+            servers[server]["methods"].add(method)
+            servers[server]["sessions"].add(r["session_id"])
+
+            if len(recent_calls) < limit:
+                recent_calls.append({
+                    "timestamp": r["timestamp"],
+                    "session_id": r["session_id"],
+                    "server": server,
+                    "method": method,
+                    "input_preview": data.get("input_preview", ""),
+                })
+
+        # Also scan tool_use events for mcp__ prefix (for data captured before mcp_call was added)
+        fallback_rows = db.execute(
+            """SELECT e.id, e.timestamp, e.session_id, e.data_json
+               FROM events e
+               WHERE e.event_type = 'tool_use'
+                 AND json_extract(e.data_json, '$.name') LIKE 'mcp__%'
+               ORDER BY e.id DESC LIMIT ?""",
+            (limit * 10,),
+        ).fetchall()
+
+        for r in fallback_rows:
+            try:
+                data = json.loads(r["data_json"]) if r["data_json"] else {}
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            tool_name = data.get("name", "")
+            parts = tool_name.split("__", 2)
+            if len(parts) < 2:
+                continue
+            server = parts[1]
+            method = parts[2] if len(parts) > 2 else "unknown"
+            session_ids.add(r["session_id"])
+
+            if server not in servers:
+                servers[server] = {"server": server, "call_count": 0, "methods": set(), "sessions": set()}
+            servers[server]["call_count"] += 1
+            servers[server]["methods"].add(method)
+            servers[server]["sessions"].add(r["session_id"])
+
+        # Convert sets to lists for JSON
+        server_list = []
+        for s in sorted(servers.values(), key=lambda x: -x["call_count"]):
+            server_list.append({
+                "server": s["server"],
+                "call_count": s["call_count"],
+                "methods": sorted(s["methods"]),
+                "session_count": len(s["sessions"]),
+            })
+
+        self._send_json({
+            "servers": server_list,
+            "total_calls": sum(s["call_count"] for s in server_list),
+            "total_servers": len(server_list),
+            "total_sessions": len(session_ids),
+            "recent_calls": recent_calls,
+        })
+
+    def _api_mcp_servers(self, params):
+        """List distinct MCP servers and their discovered methods."""
+        db = get_thread_db()
+
+        # From mcp_call events
+        rows = db.execute(
+            """SELECT data_json FROM events WHERE event_type = 'mcp_call'"""
+        ).fetchall()
+
+        # Also from tool_use events with mcp__ prefix
+        fallback_rows = db.execute(
+            """SELECT data_json FROM events
+               WHERE event_type = 'tool_use'
+                 AND json_extract(data_json, '$.name') LIKE 'mcp__%'"""
+        ).fetchall()
+
+        servers = {}
+        for r in rows:
+            try:
+                data = json.loads(r["data_json"]) if r["data_json"] else {}
+            except (json.JSONDecodeError, TypeError):
+                continue
+            server = data.get("server", "unknown")
+            method = data.get("method", "unknown")
+            if server not in servers:
+                servers[server] = {"server": server, "methods": set(), "call_count": 0}
+            servers[server]["methods"].add(method)
+            servers[server]["call_count"] += 1
+
+        for r in fallback_rows:
+            try:
+                data = json.loads(r["data_json"]) if r["data_json"] else {}
+            except (json.JSONDecodeError, TypeError):
+                continue
+            tool_name = data.get("name", "")
+            parts = tool_name.split("__", 2)
+            if len(parts) < 2:
+                continue
+            server = parts[1]
+            method = parts[2] if len(parts) > 2 else "unknown"
+            if server not in servers:
+                servers[server] = {"server": server, "methods": set(), "call_count": 0}
+            servers[server]["methods"].add(method)
+            servers[server]["call_count"] += 1
+
+        result = []
+        for s in sorted(servers.values(), key=lambda x: -x["call_count"]):
+            result.append({
+                "server": s["server"],
+                "methods": sorted(s["methods"]),
+                "call_count": s["call_count"],
+            })
+
+        self._send_json({"servers": result, "total": len(result)})
+
+    # ── Insights endpoints ─────────────────────────────────────
+
+    def _api_insights(self, params):
+        """Cross-session analytics with project grouping and efficiency metrics."""
+        db = get_thread_db()
+        period = params.get("period", ["30d"])[0]
+        period_map = {"7d": 7, "30d": 30, "90d": 90, "all": 9999}
+        days = period_map.get(period, 30)
+
+        since_clause = "AND timestamp >= datetime('now', ?)" if days < 9999 else ""
+        session_since = "AND last_activity >= datetime('now', ?)" if days < 9999 else ""
+        bind = [f"-{days} days"] if days < 9999 else []
+
+        # Top 10 tools across all sessions
+        top_tools = db.execute(
+            f"""SELECT json_extract(data_json, '$.name') as tool, COUNT(*) as cnt
+               FROM events
+               WHERE event_type = 'tool_use' {since_clause}
+               GROUP BY tool ORDER BY cnt DESC LIMIT 10""",  # nosec B608
+            bind,
+        ).fetchall()
+
+        # Top 15 most-read files
+        top_files = db.execute(
+            f"""SELECT json_extract(data_json, '$.input_preview') as file_path, COUNT(*) as cnt
+               FROM events
+               WHERE event_type = 'tool_use'
+                 AND json_extract(data_json, '$.name') IN ('Read', 'read_file')
+                 {since_clause}
+               GROUP BY file_path ORDER BY cnt DESC LIMIT 15""",  # nosec B608
+            bind,
+        ).fetchall()
+
+        # Sessions grouped by project (cwd)
+        projects = db.execute(
+            f"""SELECT cwd, COUNT(*) as sessions,
+                      COALESCE(SUM(total_input_tokens), 0) as input_tokens,
+                      COALESCE(SUM(total_output_tokens), 0) as output_tokens,
+                      COALESCE(SUM(total_turns), 0) as turns
+               FROM sessions
+               WHERE cwd IS NOT NULL AND cwd != '' {session_since}
+               GROUP BY cwd ORDER BY sessions DESC""",  # nosec B608
+            bind,
+        ).fetchall()
+
+        # Daily token trend
+        daily_trend = db.execute(
+            f"""SELECT date(timestamp) as day,
+                      COALESCE(SUM(json_extract(data_json, '$.input_tokens')), 0) as input_tokens,
+                      COALESCE(SUM(json_extract(data_json, '$.output_tokens')), 0) as output_tokens
+               FROM events
+               WHERE event_type = 'token_usage' {since_clause}
+               GROUP BY day ORDER BY day""",  # nosec B608
+            bind,
+        ).fetchall()
+
+        # Efficiency metrics
+        sessions_data = db.execute(
+            f"""SELECT session_id, total_turns, total_input_tokens, total_output_tokens
+               FROM sessions
+               WHERE total_turns > 0 {session_since}""",  # nosec B608
+            bind,
+        ).fetchall()
+
+        total_sessions = len(sessions_data)
+        avg_turns = sum(s["total_turns"] for s in sessions_data) / max(total_sessions, 1)
+        total_tokens = sum((s["total_input_tokens"] or 0) + (s["total_output_tokens"] or 0) for s in sessions_data)
+        total_turns_all = sum(s["total_turns"] for s in sessions_data)
+        avg_tokens_per_turn = total_tokens / max(total_turns_all, 1)
+
+        # Model distribution
+        models = db.execute(
+            f"""SELECT model, COUNT(*) as sessions
+               FROM sessions
+               WHERE model IS NOT NULL AND model != '' {session_since}
+               GROUP BY model ORDER BY sessions DESC""",  # nosec B608
+            bind,
+        ).fetchall()
+
+        self._send_json({
+            "period": period,
+            "days": days,
+            "total_sessions": total_sessions,
+            "efficiency": {
+                "avg_turns_per_session": round(avg_turns, 1),
+                "avg_tokens_per_turn": round(avg_tokens_per_turn, 0),
+            },
+            "top_tools": [{"tool": t["tool"], "count": t["cnt"]} for t in top_tools],
+            "top_files": [{"file": f["file_path"], "count": f["cnt"]} for f in top_files],
+            "projects": [dict(p) for p in projects],
+            "daily_trend": [dict(d) for d in daily_trend],
+            "models": [dict(m) for m in models],
+            "total_projects": len(projects),
+        })
+
+    def _api_insights_projects(self, params):
+        """Per-project drill-down with sessions list and daily breakdown."""
+        db = get_thread_db()
+        cwd = params.get("cwd", [""])[0]
+        if not cwd:
+            self._send_json({"error": "cwd parameter required"}, 400)
+            return
+
+        sessions = db.execute(
+            """SELECT session_id, start_time, model, total_input_tokens,
+                      total_output_tokens, total_turns, last_activity, title
+               FROM sessions WHERE cwd = ? ORDER BY last_activity DESC""",
+            (cwd,),
+        ).fetchall()
+
+        # Daily breakdown for this project
+        session_ids = [s["session_id"] for s in sessions]
+        daily = []
+        if session_ids:
+            placeholders = ",".join("?" * len(session_ids))
+            daily = db.execute(
+                f"""SELECT date(timestamp) as day,
+                          COALESCE(SUM(json_extract(data_json, '$.input_tokens')), 0) as input_tokens,
+                          COALESCE(SUM(json_extract(data_json, '$.output_tokens')), 0) as output_tokens
+                   FROM events
+                   WHERE event_type = 'token_usage' AND session_id IN ({placeholders})
+                   GROUP BY day ORDER BY day""",  # nosec B608
+                session_ids,
+            ).fetchall()
+
+        self._send_json({
+            "cwd": cwd,
+            "sessions": [dict(s) for s in sessions],
+            "total_sessions": len(sessions),
+            "daily": [dict(d) for d in daily],
+        })
+
+    def _api_insights_efficiency(self, params):
+        """Session comparison table with computed efficiency columns."""
+        db = get_thread_db()
+        period = params.get("period", ["30d"])[0]
+        period_map = {"7d": 7, "30d": 30, "90d": 90, "all": 9999}
+        days = period_map.get(period, 30)
+
+        session_since = "AND last_activity >= datetime('now', ?)" if days < 9999 else ""
+        bind = [f"-{days} days"] if days < 9999 else []
+
+        sessions = db.execute(
+            f"""SELECT session_id, start_time, cwd, model, total_input_tokens,
+                      total_output_tokens, total_turns, last_activity, title
+               FROM sessions
+               WHERE total_turns > 0 {session_since}
+               ORDER BY last_activity DESC""",  # nosec B608
+            bind,
+        ).fetchall()
+
+        result = []
+        for s in sessions:
+            turns = s["total_turns"] or 1
+            total_tokens = (s["total_input_tokens"] or 0) + (s["total_output_tokens"] or 0)
+            result.append({
+                **dict(s),
+                "tokens_per_turn": round(total_tokens / turns, 0),
+            })
+
+        self._send_json({"sessions": result, "total": len(result), "period": period})
+
+    # ── Report endpoint ────────────────────────────────────────
+
+    def _api_report(self, params):
+        """Generate a summary report in various formats."""
+        from claude_monitoring.report import generate_summary_report
+
+        days = int(params.get("days", ["7"])[0])
+        fmt = params.get("format", ["html"])[0]
+
+        content = generate_summary_report(DB_PATH, days, fmt)
+
+        if fmt == "html":
+            self._send_html(content)
+        elif fmt == "csv":
+            body = content.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", f"attachment; filename=report_{days}d.csv")
+            self.send_header("Content-Length", len(body))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            # markdown
+            body = content.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/markdown; charset=utf-8")
+            self.send_header("Content-Disposition", f"attachment; filename=report_{days}d.md")
+            self.send_header("Content-Length", len(body))
+            self.end_headers()
+            self.wfile.write(body)
 
 
 def _format_uptime(create_time):
@@ -2328,9 +2770,10 @@ def start_monitoring():
     # Detect plan/subscription
     info = detect_plan_info()
     if info["is_subscription"]:
-        print(f"  Plan: {info.get('cost_label', 'Subscription')} (cost shown as usage)")
+        tier = info.get("plan_tier", "")
+        print(f"  Plan: {tier}" if tier else "  Plan: Subscription")
     else:
-        print("  Billing: API (cost shown in USD)")
+        print("  Billing: API")
 
     # Layer 1a: JSONL Session Watcher
     jsonl_watcher = JSONLSessionWatcher()

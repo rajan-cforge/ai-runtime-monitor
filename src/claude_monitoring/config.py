@@ -42,6 +42,10 @@ DEFAULTS = {
         "auto_configure": False,
         "cert_path": str(Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"),
     },
+    "mcp": {
+        "known_servers": [],
+        "alert_on_unknown": True,
+    },
 }
 
 CONFIG_SEARCH_PATHS = [
@@ -188,6 +192,18 @@ def is_proxy_enabled() -> bool:
     return bool(cfg["proxy"]["enabled"])
 
 
+def get_mcp_known_servers() -> list[str]:
+    """Get list of known/trusted MCP servers from config."""
+    cfg = _get_config()
+    return list(cfg.get("mcp", {}).get("known_servers", []))
+
+
+def is_mcp_alert_on_unknown() -> bool:
+    """Check if alerts should fire for unknown MCP servers."""
+    cfg = _get_config()
+    return bool(cfg.get("mcp", {}).get("alert_on_unknown", True))
+
+
 # ─────────────────────────────────────────────────────────────
 # Config file generation
 # ─────────────────────────────────────────────────────────────
@@ -221,6 +237,10 @@ cert_path = "~/.mitmproxy/mitmproxy-ca-cert.pem"
 # [proxy.agents.cursor]
 # enabled = false
 # env_method = "app_config"
+
+[mcp]
+known_servers = []             # List of trusted MCP servers, e.g. ["filesystem", "github"]
+alert_on_unknown = true        # Alert when an unknown MCP server is detected
 """
 
 

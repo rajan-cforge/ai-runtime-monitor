@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from claude_monitoring.constants import (
     AI_PROCESS_EXACT,
     AI_PROCESS_PATTERNS,
-    MODEL_PRICING,
+    KNOWN_EXAMPLE_SECRETS,
     SENSITIVE_PATTERNS,
 )
 
@@ -48,32 +48,23 @@ def scan_sensitive(text, names_only=False):
     return found
 
 
-def estimate_cost(model, input_tokens, output_tokens, cache_read=0, cache_write=0):
-    """Estimate USD cost from token counts.
+def _is_known_example(pattern_name, text):
+    """Check if a sensitive pattern match is a known example/test value.
 
     Args:
-        model: Model name string (e.g. "claude-sonnet-4").
-        input_tokens: Number of input tokens.
-        output_tokens: Number of output tokens.
-        cache_read: Cache read tokens (10% of input price).
-        cache_write: Cache write tokens (125% of input price).
+        pattern_name: The pattern name (e.g. "aws_key").
+        text: The text that was scanned.
 
     Returns:
-        Estimated cost in USD, rounded to 6 decimal places.
+        True if the match is a known example that should be skipped.
     """
-    pricing = MODEL_PRICING["default"]
-    # Match longest key first to avoid prefix collisions
-    for key in sorted(MODEL_PRICING.keys(), key=len, reverse=True):
-        if key != "default" and key in (model or ""):
-            pricing = MODEL_PRICING[key]
-            break
-    cost = (
-        input_tokens / 1_000_000 * pricing["input"]
-        + output_tokens / 1_000_000 * pricing["output"]
-        + cache_read / 1_000_000 * pricing["input"] * 0.1
-        + cache_write / 1_000_000 * pricing["input"] * 1.25
-    )
-    return round(cost, 6)
+    examples = KNOWN_EXAMPLE_SECRETS.get(pattern_name, set())
+    if not examples:
+        return False
+    for example in examples:
+        if example in text:
+            return True
+    return False
 
 
 def extract_file_paths(text):

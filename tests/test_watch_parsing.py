@@ -32,7 +32,6 @@ def _fresh_record():
         "output_tokens": 0,
         "cache_read_tokens": 0,
         "cache_write_tokens": 0,
-        "estimated_cost_usd": 0.0,
         "stop_reason": "",
     }
 
@@ -864,49 +863,6 @@ class TestParseResponseBodyUsage:
         assert result["cache_write_tokens"] == 0
 
 
-class TestParseResponseBodyCost:
-    """Test estimated cost computation."""
-
-    def test_cost_computed_for_sonnet(self):
-        body = {
-            "usage": {"input_tokens": 1_000_000, "output_tokens": 1_000_000},
-            "content": [],
-            "model": "claude-sonnet-4-20250514",
-        }
-        record = _fresh_record()
-        record["model"] = "claude-sonnet-4-20250514"
-        result = parse_response_body(body, record)
-
-        # sonnet-4: input $3/M, output $15/M => 3 + 15 = 18.0
-        assert result["estimated_cost_usd"] == 18.0
-
-    def test_cost_with_cache_tokens(self):
-        body = {
-            "usage": {
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cache_read_input_tokens": 1_000_000,
-                "cache_creation_input_tokens": 1_000_000,
-            },
-            "content": [],
-        }
-        record = _fresh_record()
-        record["model"] = "claude-sonnet-4"
-        result = parse_response_body(body, record)
-
-        # cache_read: 1M * $3/M * 0.1 = 0.3
-        # cache_write: 1M * $3/M * 1.25 = 3.75
-        assert result["estimated_cost_usd"] == round(0.3 + 3.75, 6)
-
-    def test_cost_zero_tokens(self):
-        body = {"usage": {}, "content": []}
-        record = _fresh_record()
-        record["model"] = "claude-sonnet-4"
-        result = parse_response_body(body, record)
-
-        assert result["estimated_cost_usd"] == 0.0
-
-
 class TestParseResponseBodyStopReason:
     """Test stop_reason extraction."""
 
@@ -1183,9 +1139,6 @@ class TestParseSSEResponseBasic:
         assert "bash" in tool_calls
         assert result["tool_call_count"] == 1
 
-        # Cost should be computed
-        assert result["estimated_cost_usd"] > 0
-
     def test_multiple_tool_use_blocks(self):
         raw = _build_sse(
             {
@@ -1332,31 +1285,6 @@ class TestParseSSEResponseTokenAggregation:
 
         assert result["cache_read_tokens"] == 2000
         assert result["cache_write_tokens"] == 800
-
-
-class TestParseSSEResponseCost:
-    """Test cost estimation from SSE parsed data."""
-
-    def test_cost_uses_model_and_tokens(self):
-        raw = _build_sse(
-            {
-                "type": "message_start",
-                "message": {
-                    "model": "claude-sonnet-4",
-                    "usage": {"input_tokens": 1_000_000},
-                },
-            },
-            {
-                "type": "message_delta",
-                "delta": {"stop_reason": "end_turn"},
-                "usage": {"output_tokens": 1_000_000},
-            },
-        )
-        record = _fresh_record()
-        result = parse_sse_response(raw, record)
-
-        # sonnet: $3/M input + $15/M output = $18
-        assert result["estimated_cost_usd"] == 18.0
 
 
 class TestParseSSEResponseEdgeCases:
@@ -1544,3 +1472,222 @@ class TestParseSSEResponseEdgeCases:
         result = parse_sse_response(raw, record)
 
         assert result["stream"] == "true"
+
+
+# ─────────────────────────────────────────────
+# Tests for Multi-Provider Parsers
+# ─────────────────────────────────────────────
+
+
+class TestParseOpenAIRequest:
+    """Tests for parse_openai_request()."""
+
+    def test_basic_request(self):
+        from claude_monitoring.watch import parse_openai_request
+
+        body = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Hello world"},
+            ],
+            "stream": True,
+        }
+        record = _fresh_record()
+        result = parse_openai_request(body, record)
+        assert result["model"] == "gpt-4o"
+        assert result["stream"] == "true"
+        assert result["num_messages"] == 2
+        assert result["system_prompt_chars"] == len("You are a helpful assistant.")
+        assert "Hello world" in result["last_user_msg_preview"]
+
+    def test_tool_calls_in_assistant_message(self):
+        from claude_monitoring.watch import parse_openai_request
+
+        body = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "Search for X"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "search", "arguments": '{"q":"X"}'}}
+                    ],
+                },
+            ],
+        }
+        record = _fresh_record()
+        result = parse_openai_request(body, record)
+        tools = json.loads(result["tool_calls"])
+        assert "search" in tools
+        assert result["tool_call_count"] == 1
+
+
+class TestParseOpenAIResponse:
+    """Tests for parse_openai_response()."""
+
+    def test_basic_response(self):
+        from claude_monitoring.watch import parse_openai_response
+
+        body = {
+            "model": "gpt-4o",
+            "choices": [{"message": {"role": "assistant", "content": "Hello!"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        }
+        record = _fresh_record()
+        result = parse_openai_response(body, record)
+        assert result["input_tokens"] == 100
+        assert result["output_tokens"] == 50
+        assert result["stop_reason"] == "stop"
+        assert "Hello!" in result["assistant_msg_preview"]
+
+    def test_tool_calls_in_response(self):
+        from claude_monitoring.watch import parse_openai_response
+
+        body = {
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 200, "completion_tokens": 30},
+        }
+        record = _fresh_record()
+        result = parse_openai_response(body, record)
+        tools = json.loads(result["tool_calls"])
+        assert "get_weather" in tools
+        assert result["stop_reason"] == "tool_calls"
+
+
+class TestParseOpenAISSE:
+    """Tests for parse_openai_sse_response()."""
+
+    def test_basic_stream(self):
+        from claude_monitoring.watch import parse_openai_sse_response
+
+        raw = (
+            'data: {"model":"gpt-4o","choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n'
+            'data: {"model":"gpt-4o","choices":[{"delta":{"content":" world"},"finish_reason":"stop"}]}\n'
+            'data: {"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n'
+            "data: [DONE]\n"
+        )
+        record = _fresh_record()
+        result = parse_openai_sse_response(raw, record)
+        assert result["model"] == "gpt-4o"
+        assert result["stream"] == "true"
+        assert result["input_tokens"] == 10
+        assert result["output_tokens"] == 5
+        assert "Hello world" in result["assistant_msg_preview"]
+        assert result["stop_reason"] == "stop"
+
+    def test_tool_calls_in_stream(self):
+        from claude_monitoring.watch import parse_openai_sse_response
+
+        raw = (
+            'data: {"model":"gpt-4o","choices":[{"delta":{"tool_calls":[{"function":{"name":"search"}}]},"finish_reason":null}]}\n'
+            'data: {"model":"gpt-4o","choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n'
+            "data: [DONE]\n"
+        )
+        record = _fresh_record()
+        result = parse_openai_sse_response(raw, record)
+        tools = json.loads(result["tool_calls"])
+        assert "search" in tools
+
+
+class TestParseGoogleResponse:
+    """Tests for parse_google_response()."""
+
+    def test_basic_gemini_response(self):
+        from claude_monitoring.watch import parse_google_response
+
+        body = {
+            "candidates": [
+                {
+                    "content": {"parts": [{"text": "Hello from Gemini!"}], "role": "model"},
+                    "finishReason": "STOP",
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 20, "totalTokenCount": 70},
+            "modelVersion": "gemini-2.0-flash",
+        }
+        record = _fresh_record()
+        result = parse_google_response(body, record)
+        assert result["input_tokens"] == 50
+        assert result["output_tokens"] == 20
+        assert result["model"] == "gemini-2.0-flash"
+        assert "Hello from Gemini!" in result["assistant_msg_preview"]
+        assert result["stop_reason"] == "STOP"
+
+    def test_function_call_in_gemini(self):
+        from claude_monitoring.watch import parse_google_response
+
+        body = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [{"functionCall": {"name": "get_weather", "args": {"location": "NYC"}}}],
+                        "role": "model",
+                    },
+                    "finishReason": "STOP",
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 30, "candidatesTokenCount": 10},
+        }
+        record = _fresh_record()
+        result = parse_google_response(body, record)
+        tools = json.loads(result["tool_calls"])
+        assert "get_weather" in tools
+
+
+class TestServiceParserDispatch:
+    """Tests for SERVICE_PARSERS_REQUEST and SERVICE_PARSERS_RESPONSE dispatch maps."""
+
+    def test_all_request_parsers_are_callable(self):
+        from claude_monitoring.watch import SERVICE_PARSERS_REQUEST
+
+        for service, parser in SERVICE_PARSERS_REQUEST.items():
+            assert callable(parser), f"Parser for {service} is not callable"
+
+    def test_all_response_parsers_are_callable(self):
+        from claude_monitoring.watch import SERVICE_PARSERS_RESPONSE
+
+        for service, (json_parser, sse_parser) in SERVICE_PARSERS_RESPONSE.items():
+            if json_parser is not None:
+                assert callable(json_parser), f"JSON parser for {service} is not callable"
+            if sse_parser is not None:
+                assert callable(sse_parser), f"SSE parser for {service} is not callable"
+
+    def test_anthropic_uses_original_parsers(self):
+        from claude_monitoring.watch import (
+            SERVICE_PARSERS_REQUEST,
+            SERVICE_PARSERS_RESPONSE,
+            parse_request_body,
+            parse_response_body,
+            parse_sse_response,
+        )
+
+        assert SERVICE_PARSERS_REQUEST["anthropic_api"] is parse_request_body
+        json_p, sse_p = SERVICE_PARSERS_RESPONSE["anthropic_api"]
+        assert json_p is parse_response_body
+        assert sse_p is parse_sse_response
+
+    def test_openai_compatible_services_share_parsers(self):
+        from claude_monitoring.watch import SERVICE_PARSERS_REQUEST, parse_openai_request
+
+        for svc in ("groq_api", "together_api", "deepseek_api", "openrouter_api"):
+            assert SERVICE_PARSERS_REQUEST[svc] is parse_openai_request, f"{svc} should use parse_openai_request"
+
+    def test_gemini_has_no_sse_parser(self):
+        from claude_monitoring.watch import SERVICE_PARSERS_RESPONSE
+
+        _, sse_parser = SERVICE_PARSERS_RESPONSE["gemini_api"]
+        assert sse_parser is None

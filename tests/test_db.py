@@ -121,7 +121,7 @@ class TestInsertApiCall:
             "stream": "true",
             "input_tokens": 5000,
             "output_tokens": 1000,
-            "estimated_cost_usd": 0.03,
+            "estimated_cost_usd": 0.0,
             "latency_ms": 1500,
             "stop_reason": "end_turn",
             "request_id": "req-abc",

@@ -20,7 +20,6 @@
   .stat-card .value { font-size: 1.8em; font-weight: bold; color: #58a6ff; }
   .stat-card .label { font-size: 0.75em; color: #8b949e; margin-top: 4px; text-transform: uppercase; }
   .stat-card.alert .value { color: #f85149; }
-  .stat-card.cost .value { color: #3fb950; }
   .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
                  padding: 0 30px 20px; }
   .chart-box { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
@@ -62,7 +61,6 @@
 </div>
 <div class="charts-grid">
   <div class="chart-box"><h3>Token Usage Over Time</h3><canvas id="chartTokens"></canvas></div>
-  <div class="chart-box"><h3>Cumulative Cost (USD)</h3><canvas id="chartCost"></canvas></div>
   <div class="chart-box"><h3>Service Breakdown</h3><canvas id="chartServices"></canvas></div>
   <div class="chart-box"><h3>Latency Distribution (ms)</h3><canvas id="chartLatency"></canvas></div>
   <div class="chart-box"><h3>Tool Call Frequency</h3><canvas id="chartTools"></canvas></div>
@@ -79,11 +77,10 @@
         <th onclick="sortTable(3)">Model</th>
         <th onclick="sortTable(4)">In Tok</th>
         <th onclick="sortTable(5)">Out Tok</th>
-        <th onclick="sortTable(6)">Cost</th>
-        <th onclick="sortTable(7)">Latency</th>
-        <th onclick="sortTable(8)">Tools</th>
-        <th onclick="sortTable(9)">Prompt Preview</th>
-        <th onclick="sortTable(10)">Sensitive</th>
+        <th onclick="sortTable(6)">Latency</th>
+        <th onclick="sortTable(7)">Tools</th>
+        <th onclick="sortTable(8)">Prompt Preview</th>
+        <th onclick="sortTable(9)">Sensitive</th>
       </tr></thead>
       <tbody id="logBody"></tbody>
     </table>
@@ -134,7 +131,6 @@ function renderStats(data) {
   const apiReqs = data.filter(r => r.destination_service?.includes('api')).length;
   const inTok = data.reduce((s, r) => s + parseInt(r.input_tokens || 0), 0);
   const outTok = data.reduce((s, r) => s + parseInt(r.output_tokens || 0), 0);
-  const cost = data.reduce((s, r) => s + parseFloat(r.estimated_cost_usd || 0), 0);
   const sentKB = data.reduce((s, r) => s + parseInt(r.request_size_bytes || 0), 0) / 1024;
   const recvKB = data.reduce((s, r) => s + parseInt(r.response_size_bytes || 0), 0) / 1024;
   const sensitive = data.filter(r => r.sensitive_patterns).length;
@@ -145,7 +141,6 @@ function renderStats(data) {
     <div class="stat-card"><div class="value">${apiReqs}</div><div class="label">API Calls</div></div>
     <div class="stat-card"><div class="value">${inTok.toLocaleString()}</div><div class="label">Input Tokens</div></div>
     <div class="stat-card"><div class="value">${outTok.toLocaleString()}</div><div class="label">Output Tokens</div></div>
-    <div class="stat-card cost"><div class="value">$${cost.toFixed(4)}</div><div class="label">Total Cost</div></div>
     <div class="stat-card"><div class="value">${(sentKB/1024).toFixed(2)} MB</div><div class="label">Data Sent</div></div>
     <div class="stat-card"><div class="value">${(recvKB/1024).toFixed(2)} MB</div><div class="label">Data Received</div></div>
     <div class="stat-card"><div class="value">${avgLat.toFixed(0)}ms</div><div class="label">Avg Latency</div></div>
@@ -167,17 +162,6 @@ function renderCharts(data) {
         { label: "Output", data: data.map(r => parseInt(r.output_tokens||0)),
           borderColor: "#E8744F", backgroundColor: "rgba(232,116,79,0.1)", fill: true, pointRadius: 1 }
       ]},
-    options: { responsive: true, scales: { y: { beginAtZero: true } },
-               plugins: { legend: { labels: { color: "#c9d1d9" } } } }
-  });
-
-  // Cumulative cost
-  let cum = 0;
-  const cumCosts = data.map(r => { cum += parseFloat(r.estimated_cost_usd||0); return cum; });
-  charts.cost = new Chart(document.getElementById("chartCost"), {
-    type: "line", data: { labels,
-      datasets: [{ label: "Cumulative $", data: cumCosts,
-        borderColor: "#3fb950", backgroundColor: "rgba(63,185,80,0.1)", fill: true, pointRadius: 1 }]},
     options: { responsive: true, scales: { y: { beginAtZero: true } },
                plugins: { legend: { labels: { color: "#c9d1d9" } } } }
   });
@@ -246,7 +230,6 @@ function renderTable(data) {
       <td>${r.destination_service||''}</td><td>${(r.model||'').substring(0,20)}</td>
       <td>${parseInt(r.input_tokens||0).toLocaleString()}</td>
       <td>${parseInt(r.output_tokens||0).toLocaleString()}</td>
-      <td>$${parseFloat(r.estimated_cost_usd||0).toFixed(4)}</td>
       <td>${r.latency_ms||''}ms</td>
       <td>${tools}</td>
       <td title="${(r.last_user_msg_preview||'').replace(/"/g,'&quot;')}">${(r.last_user_msg_preview||'').substring(0,60)}</td>
@@ -258,9 +241,9 @@ function renderTable(data) {
 function sortTable(col) {
   if (sortCol === col) sortAsc = !sortAsc; else { sortCol = col; sortAsc = true; }
   const keys = ['turn_number','timestamp','destination_service','model','input_tokens',
-    'output_tokens','estimated_cost_usd','latency_ms','tool_calls','last_user_msg_preview','sensitive_patterns'];
+    'output_tokens','latency_ms','tool_calls','last_user_msg_preview','sensitive_patterns'];
   const key = keys[col];
-  const numKeys = new Set(['turn_number','input_tokens','output_tokens','estimated_cost_usd','latency_ms']);
+  const numKeys = new Set(['turn_number','input_tokens','output_tokens','latency_ms']);
   allData.sort((a, b) => {
     let va = a[key]||'', vb = b[key]||'';
     if (numKeys.has(key)) { va = parseFloat(va)||0; vb = parseFloat(vb)||0; }

@@ -368,7 +368,6 @@ class TestDetectPlanInfo:
             info = detect_plan_info()
 
         assert info["is_subscription"] is True
-        assert info["cost_label"] == "Subscription"
 
     def test_stats_cache_all_zero_costs(self, tmp_path):
         """stats-cache.json with all zero costUSD -> subscription."""
@@ -435,7 +434,6 @@ class TestDetectPlanInfo:
         assert info["is_subscription"] is True
         assert info["plan_tier"] == "max_5x"
         assert info["rate_tier"] == "tier4"
-        assert "max_5x" in info["cost_label"]
 
     def test_credentials_rate_tier_fallback(self, tmp_path):
         """credentials.json with only rateLimitTier (no subscriptionType) sets plan_tier
@@ -499,7 +497,6 @@ class TestDetectPlanInfo:
             info = detect_plan_info()
 
         assert info["is_subscription"] is False
-        assert info["cost_label"] == "Total Cost"
 
     def test_malformed_stats_cache_gracefully_handled(self, tmp_path):
         """Malformed JSON in stats-cache.json should not crash."""

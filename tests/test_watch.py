@@ -1,6 +1,6 @@
 """Tests for claude_watch utility functions."""
 
-from claude_monitoring.utils import estimate_cost, extract_file_paths, extract_urls
+from claude_monitoring.utils import extract_file_paths, extract_urls
 
 
 class TestExtractFilePaths:
@@ -49,15 +49,3 @@ class TestExtractUrls:
         assert extract_urls(text) == []
 
 
-class TestWatchEstimateCost:
-    def test_basic_cost(self):
-        cost = estimate_cost("claude-sonnet-4", 1_000_000, 1_000_000)
-        assert cost == 3.00 + 15.00
-
-    def test_with_cache(self):
-        cost = estimate_cost("claude-sonnet-4", 0, 0, cache_read=1_000_000)
-        assert cost > 0
-
-    def test_zero_tokens(self):
-        cost = estimate_cost("claude-sonnet-4", 0, 0)
-        assert cost == 0.0

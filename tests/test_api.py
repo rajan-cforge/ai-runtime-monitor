@@ -21,8 +21,8 @@ def _setup_test_db(tmp_path):
 
     # Insert sample data
     conn.execute(
-        "INSERT INTO sessions (session_id, start_time, model, total_turns, total_input_tokens, total_output_tokens, total_cost, last_activity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ("test-sess-1", "2026-01-01T00:00:00Z", "claude-sonnet-4", 5, 1000, 500, 0.054, "2026-01-01T00:10:00Z"),
+        "INSERT INTO sessions (session_id, start_time, model, total_turns, total_input_tokens, total_output_tokens, last_activity) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("test-sess-1", "2026-01-01T00:00:00Z", "claude-sonnet-4", 5, 1000, 500, "2026-01-01T00:10:00Z"),
     )
     conn.execute(
         "INSERT INTO events (timestamp, session_id, event_type, source_layer, data_json) VALUES (?, ?, ?, ?, ?)",
@@ -51,11 +51,11 @@ def _setup_test_db(tmp_path):
         """INSERT INTO api_calls (timestamp, session_id, turn_id, turn_number,
             destination_host, destination_service, endpoint_path, http_method,
             http_status, model, stream, input_tokens, output_tokens,
-            cache_read_tokens, cache_write_tokens, estimated_cost_usd,
+            cache_read_tokens, cache_write_tokens,
             request_size_bytes, response_size_bytes, latency_ms, num_messages,
             system_prompt_chars, tool_call_count, sensitive_pattern_count,
             stop_reason, request_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             "2026-01-01T00:01:00Z",
             "test-sess-1",
@@ -72,7 +72,6 @@ def _setup_test_db(tmp_path):
             1000,
             100,
             50,
-            0.018,
             12000,
             8000,
             1500,
@@ -88,11 +87,11 @@ def _setup_test_db(tmp_path):
         """INSERT INTO api_calls (timestamp, session_id, turn_id, turn_number,
             destination_host, destination_service, endpoint_path, http_method,
             http_status, model, stream, input_tokens, output_tokens,
-            cache_read_tokens, cache_write_tokens, estimated_cost_usd,
+            cache_read_tokens, cache_write_tokens,
             request_size_bytes, response_size_bytes, latency_ms, num_messages,
             system_prompt_chars, tool_call_count, sensitive_pattern_count,
             stop_reason, request_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             "2026-01-01T00:02:00Z",
             "test-sess-1",
@@ -109,7 +108,6 @@ def _setup_test_db(tmp_path):
             2000,
             200,
             100,
-            0.033,
             20000,
             15000,
             2500,
@@ -133,7 +131,7 @@ def _setup_test_db(tmp_path):
             "test-sess-1",
             "token_usage",
             "network",
-            '{"input_tokens":800,"output_tokens":400,"cost":0.01}',
+            '{"input_tokens":800,"output_tokens":400}',
         ),
     )
     # Sensitive data event for alerts testing
@@ -162,6 +160,80 @@ def _setup_test_db(tmp_path):
     conn.execute(
         "INSERT INTO file_events (timestamp, path, operation, session_id, size) VALUES (?, ?, ?, ?, ?)",
         ("2026-01-01T00:05:00Z", "/tmp/foo.py", "write", "test-sess-1", 1234),
+    )
+    # MCP tool_use events for MCP testing
+    conn.execute(
+        "INSERT INTO events (timestamp, session_id, event_type, source_layer, data_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            "2026-01-01T00:06:00Z",
+            "test-sess-1",
+            "tool_use",
+            "network",
+            '{"name":"mcp__filesystem__read_file","id":"t1","input":{"path":"/tmp/foo"},"input_preview":"/tmp/foo"}',
+        ),
+    )
+    conn.execute(
+        "INSERT INTO events (timestamp, session_id, event_type, source_layer, data_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            "2026-01-01T00:06:01Z",
+            "test-sess-1",
+            "mcp_call",
+            "network",
+            '{"server":"filesystem","method":"read_file","tool_name":"mcp__filesystem__read_file","input_preview":"/tmp/foo"}',
+        ),
+    )
+    conn.execute(
+        "INSERT INTO events (timestamp, session_id, event_type, source_layer, data_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            "2026-01-01T00:07:00Z",
+            "test-sess-1",
+            "tool_use",
+            "network",
+            '{"name":"mcp__github__list_repos","id":"t2","input":{},"input_preview":"{}"}',
+        ),
+    )
+    conn.execute(
+        "INSERT INTO events (timestamp, session_id, event_type, source_layer, data_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            "2026-01-01T00:07:01Z",
+            "test-sess-1",
+            "mcp_call",
+            "network",
+            '{"server":"github","method":"list_repos","tool_name":"mcp__github__list_repos","input_preview":"{}"}',
+        ),
+    )
+    conn.execute(
+        "INSERT INTO events (timestamp, session_id, event_type, source_layer, data_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            "2026-01-01T00:07:02Z",
+            "test-sess-1",
+            "mcp_call",
+            "network",
+            '{"server":"filesystem","method":"write_file","tool_name":"mcp__filesystem__write_file","input_preview":"/tmp/bar"}',
+        ),
+    )
+    # Second session for insights testing
+    conn.execute(
+        "INSERT INTO sessions (session_id, start_time, cwd, model, total_turns, total_input_tokens, total_output_tokens, last_activity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("test-sess-2", "2026-01-01T01:00:00Z", "/home/user/project-b", "claude-opus-4", 10, 5000, 2500, "2026-01-01T02:00:00Z"),
+    )
+    conn.execute(
+        "INSERT INTO events (timestamp, session_id, event_type, source_layer, data_json) VALUES (?, ?, ?, ?, ?)",
+        ("2026-01-01T01:00:00Z", "test-sess-2", "user_prompt", "network", '{"text":"build feature"}'),
+    )
+    conn.execute(
+        "INSERT INTO events (timestamp, session_id, event_type, source_layer, data_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            "2026-01-01T01:01:00Z",
+            "test-sess-2",
+            "token_usage",
+            "network",
+            '{"input_tokens":5000,"output_tokens":2500,"model":"claude-opus-4"}',
+        ),
+    )
+    conn.execute(
+        "INSERT INTO events (timestamp, session_id, event_type, source_layer, data_json) VALUES (?, ?, ?, ?, ?)",
+        ("2026-01-01T01:01:00Z", "test-sess-2", "tool_use", "network", '{"name":"Read","input_preview":"/src/main.py"}'),
     )
     conn.commit()
     conn.close()
@@ -207,7 +279,6 @@ class TestDashboardAPI:
         assert "total_sessions" in data
         assert "total_input_tokens" in data
         assert "total_output_tokens" in data
-        assert "total_cost" in data
 
     def test_api_sessions(self, api_server):
         resp = urlopen(f"{api_server}/api/sessions")
@@ -347,7 +418,6 @@ class TestDashboardAPI:
         assert data["total_calls"] == 2
         assert data["total_input_tokens"] == 13000
         assert data["total_output_tokens"] == 3000
-        assert data["total_cost"] > 0
         assert data["avg_latency"] > 0
         assert "by_service" in data
         assert "by_model" in data
@@ -361,10 +431,6 @@ class TestDashboardAPI:
         assert data["session_id"] == "test-sess-1"
         assert data["total_calls"] == 2
         assert len(data["calls"]) == 2
-        # Verify cumulative cost
-        assert data["calls"][0]["cumulative_cost"] > 0
-        assert data["calls"][1]["cumulative_cost"] > data["calls"][0]["cumulative_cost"]
-        assert data["total_cost"] == data["calls"][-1]["cumulative_cost"]
 
     def test_api_session_traffic_empty(self, api_server):
         resp = urlopen(f"{api_server}/api/session/nonexistent/traffic")
@@ -625,3 +691,141 @@ class TestDashboardAPI:
         data = json.loads(resp.read())
         for evt in data["data"]:
             assert evt["event_type"] == "user_prompt"
+
+    # ── MCP endpoints ────────────────────────────────────────────────
+
+    def test_mcp_stats_endpoint(self, api_server):
+        resp = urlopen(f"{api_server}/api/mcp/stats")
+        assert resp.status == 200
+        data = json.loads(resp.read())
+        assert "servers" in data
+        assert "total_calls" in data
+        assert "total_servers" in data
+        assert "recent_calls" in data
+        # Should have filesystem and github servers from test data
+        server_names = [s["server"] for s in data["servers"]]
+        assert "filesystem" in server_names
+        assert "github" in server_names
+        # Filesystem has 2 calls (read_file, write_file), github has 1
+        fs = next(s for s in data["servers"] if s["server"] == "filesystem")
+        assert fs["call_count"] >= 2
+        assert "read_file" in fs["methods"]
+
+    def test_mcp_servers_endpoint(self, api_server):
+        resp = urlopen(f"{api_server}/api/mcp/servers")
+        assert resp.status == 200
+        data = json.loads(resp.read())
+        assert "servers" in data
+        assert "total" in data
+        assert data["total"] >= 2
+        server_names = [s["server"] for s in data["servers"]]
+        assert "filesystem" in server_names
+        assert "github" in server_names
+        # Check methods are listed
+        fs = next(s for s in data["servers"] if s["server"] == "filesystem")
+        assert "read_file" in fs["methods"]
+        assert fs["call_count"] >= 2
+
+    # ── Insights endpoints ───────────────────────────────────────────
+
+    def test_insights_endpoint(self, api_server):
+        resp = urlopen(f"{api_server}/api/insights?period=all")
+        assert resp.status == 200
+        data = json.loads(resp.read())
+        assert "total_sessions" in data
+        assert "efficiency" in data
+        assert "top_tools" in data
+        assert "top_files" in data
+        assert "projects" in data
+        assert "daily_trend" in data
+        assert "models" in data
+        assert data["total_sessions"] >= 2
+        assert data["efficiency"]["avg_turns_per_session"] > 0
+
+    def test_insights_period_filter(self, api_server):
+        # 7d filter — our test data is from 2026-01-01 which may be outside 7d
+        resp = urlopen(f"{api_server}/api/insights?period=7d")
+        assert resp.status == 200
+        data = json.loads(resp.read())
+        assert "total_sessions" in data
+
+        # All time — should include everything
+        resp_all = urlopen(f"{api_server}/api/insights?period=all")
+        data_all = json.loads(resp_all.read())
+        assert data_all["total_sessions"] >= data["total_sessions"]
+
+    def test_insights_projects_detail(self, api_server):
+        resp = urlopen(f"{api_server}/api/insights/projects?cwd=/home/user/project-b")
+        assert resp.status == 200
+        data = json.loads(resp.read())
+        assert data["cwd"] == "/home/user/project-b"
+        assert data["total_sessions"] >= 1
+        assert "sessions" in data
+        assert "daily" in data
+
+    def test_insights_projects_missing_cwd(self, api_server):
+        from urllib.error import HTTPError
+
+        with pytest.raises(HTTPError) as exc_info:
+            urlopen(f"{api_server}/api/insights/projects")
+        assert exc_info.value.code == 400
+
+    def test_insights_efficiency(self, api_server):
+        resp = urlopen(f"{api_server}/api/insights/efficiency?period=all")
+        assert resp.status == 200
+        data = json.loads(resp.read())
+        assert "sessions" in data
+        assert "total" in data
+        assert data["total"] >= 2
+        # Each session should have computed columns
+        sess = data["sessions"][0]
+        assert "tokens_per_turn" in sess
+
+    # ── Export CSV and traffic ────────────────────────────────────────
+
+    def test_export_csv_format(self, api_server):
+        resp = urlopen(f"{api_server}/api/export?type=sessions&format=csv")
+        assert resp.status == 200
+        assert "text/csv" in resp.headers.get("Content-Type", "")
+        body = resp.read().decode()
+        lines = body.strip().split("\n")
+        assert len(lines) >= 2  # header + at least 1 row
+        assert "session_id" in lines[0]
+
+    def test_export_traffic(self, api_server):
+        resp = urlopen(f"{api_server}/api/export?type=traffic&format=json")
+        assert resp.status == 200
+        data = json.loads(resp.read())
+        assert data["export_type"] == "traffic"
+        assert isinstance(data["data"], list)
+        assert data["count"] >= 1
+
+    def test_export_traffic_csv(self, api_server):
+        resp = urlopen(f"{api_server}/api/export?type=traffic&format=csv")
+        assert resp.status == 200
+        assert "text/csv" in resp.headers.get("Content-Type", "")
+
+    # ── Report endpoint ──────────────────────────────────────────────
+
+    def test_report_html(self, api_server):
+        resp = urlopen(f"{api_server}/api/report?days=7&format=html")
+        assert resp.status == 200
+        body = resp.read().decode()
+        assert "<html" in body.lower()
+        assert "AI Runtime Monitor" in body
+        assert "Chart" in body  # Chart.js reference
+
+    def test_report_markdown(self, api_server):
+        resp = urlopen(f"{api_server}/api/report?days=7&format=markdown")
+        assert resp.status == 200
+        assert "text/markdown" in resp.headers.get("Content-Type", "")
+        body = resp.read().decode()
+        assert "# AI Runtime Monitor Report" in body
+        assert "## Overview" in body
+
+    def test_report_csv(self, api_server):
+        resp = urlopen(f"{api_server}/api/report?days=7&format=csv")
+        assert resp.status == 200
+        assert "text/csv" in resp.headers.get("Content-Type", "")
+        body = resp.read().decode()
+        assert "day" in body  # header

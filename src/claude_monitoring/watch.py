@@ -50,7 +50,7 @@ from claude_monitoring.config import (
 )
 from claude_monitoring.constants import AI_HOSTS, CSV_COLUMNS
 from claude_monitoring.db import insert_api_call
-from claude_monitoring.utils import estimate_cost, extract_file_paths, extract_urls, scan_sensitive
+from claude_monitoring.utils import extract_file_paths, extract_urls, scan_sensitive
 
 # ─────────────────────────────────────────────
 # STANDALONE PARSING FUNCTIONS (testable without mitmproxy)
@@ -175,13 +175,7 @@ def parse_response_body(body: dict, record: dict) -> dict:
     record["stop_reason"] = body.get("stop_reason", "")
     record["model"] = record["model"] or body.get("model", "")
 
-    record["estimated_cost_usd"] = estimate_cost(
-        record["model"],
-        record["input_tokens"],
-        record["output_tokens"],
-        record["cache_read_tokens"],
-        record["cache_write_tokens"],
-    )
+    record["estimated_cost_usd"] = 0.0
 
     # Extract assistant text preview
     content = body.get("content", [])
@@ -263,7 +257,7 @@ def parse_sse_response(raw: str, record: dict) -> dict:
     record["stop_reason"] = stop_reason
     record["stream"] = "true"
 
-    record["estimated_cost_usd"] = estimate_cost(record["model"], input_tok, output_tok, cache_read, cache_write)
+    record["estimated_cost_usd"] = 0.0
 
     if text_chunks:
         record["assistant_msg_preview"] = "".join(text_chunks)[:300].replace("\n", " ").replace(",", ";")
@@ -274,6 +268,231 @@ def parse_sse_response(raw: str, record: dict) -> dict:
         record["tool_call_count"] = len(json.loads(record["tool_calls"]))
 
     return record
+
+
+def parse_openai_request(body: dict, record: dict) -> dict:
+    """Parse an OpenAI-compatible API request body and populate record fields.
+
+    Works for OpenAI, Groq, Together, DeepSeek, OpenRouter (all OpenAI-compatible).
+    """
+    record["model"] = body.get("model", "")
+    record["stream"] = str(body.get("stream", False)).lower()
+
+    messages = body.get("messages", [])
+    record["num_messages"] = len(messages)
+
+    # System prompt length
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    system_text = " ".join(m.get("content", "") for m in system_msgs if isinstance(m.get("content"), str))
+    record["system_prompt_chars"] = len(system_text)
+
+    # Scan full request for sensitive patterns
+    full_text = json.dumps(body)
+    found = scan_sensitive(full_text, names_only=True)
+    record["sensitive_patterns"] = ",".join(found)
+    record["sensitive_pattern_count"] = len(found)
+
+    # Analyze messages
+    tool_calls, bash_cmds, files_read, files_written, urls = [], [], [], [], []
+    content_types = set()
+    last_user_text = ""
+
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+
+        if isinstance(content, str):
+            content_types.add("text")
+            if role == "user":
+                last_user_text = content
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type", "")
+                content_types.add(btype or "text")
+                if btype == "text":
+                    if role == "user":
+                        last_user_text = block.get("text", "")
+
+        # OpenAI-style tool_calls in assistant messages
+        if role == "assistant" and isinstance(msg.get("tool_calls"), list):
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+                if name:
+                    tool_calls.append(name)
+                args_str = fn.get("arguments", "")
+                urls.extend(extract_urls(args_str))
+
+    record["last_user_msg_preview"] = last_user_text[:300].replace("\n", " ").replace(",", ";")
+    record["tool_calls"] = json.dumps(list(set(tool_calls)))
+    record["tool_call_count"] = len(tool_calls)
+    record["bash_commands"] = json.dumps(bash_cmds[:10])
+    record["files_read"] = json.dumps(list(set(files_read))[:20])
+    record["files_written"] = json.dumps(list(set(files_written))[:20])
+    record["urls_fetched"] = json.dumps(list(set(urls))[:20])
+    record["content_types_sent"] = ",".join(sorted(content_types))
+
+    return record
+
+
+def parse_openai_response(body: dict, record: dict) -> dict:
+    """Parse an OpenAI-compatible API response body and populate record fields."""
+    usage = body.get("usage", {})
+    record["input_tokens"] = usage.get("prompt_tokens", 0)
+    record["output_tokens"] = usage.get("completion_tokens", 0)
+    record["model"] = record["model"] or body.get("model", "")
+
+    record["estimated_cost_usd"] = 0.0
+
+    # Extract assistant text and tool calls
+    choices = body.get("choices", [])
+    text_parts, tool_calls = [], []
+    stop_reason = ""
+    for choice in choices:
+        msg = choice.get("message", {})
+        if msg.get("content"):
+            text_parts.append(msg["content"])
+        if isinstance(msg.get("tool_calls"), list):
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                if fn.get("name"):
+                    tool_calls.append(fn["name"])
+        stop_reason = choice.get("finish_reason", "") or stop_reason
+
+    record["stop_reason"] = stop_reason
+    record["assistant_msg_preview"] = " ".join(text_parts)[:300].replace("\n", " ").replace(",", ";")
+
+    if tool_calls:
+        existing = json.loads(record.get("tool_calls", "[]"))
+        record["tool_calls"] = json.dumps(list(set(existing + tool_calls)))
+        record["tool_call_count"] = len(json.loads(record["tool_calls"]))
+
+    return record
+
+
+def parse_openai_sse_response(raw: str, record: dict) -> dict:
+    """Parse OpenAI-compatible SSE streaming response."""
+    input_tok = output_tok = 0
+    text_chunks, tool_calls = [], []
+    stop_reason = ""
+
+    for line in raw.split("\n"):
+        if not line.startswith("data: "):
+            continue
+        data_str = line[6:].strip()
+        if data_str in ("[DONE]", ""):
+            continue
+        try:
+            event = json.loads(data_str)
+
+            # Extract model
+            record["model"] = record["model"] or event.get("model", "")
+
+            # Usage in final chunk (OpenAI includes usage when stream_options.include_usage=true)
+            usage = event.get("usage")
+            if usage:
+                input_tok = usage.get("prompt_tokens", 0) or input_tok
+                output_tok = usage.get("completion_tokens", 0) or output_tok
+
+            choices = event.get("choices", [])
+            for choice in choices:
+                delta = choice.get("delta", {})
+                if delta.get("content"):
+                    text_chunks.append(delta["content"])
+                if isinstance(delta.get("tool_calls"), list):
+                    for tc in delta["tool_calls"]:
+                        fn = tc.get("function", {})
+                        if fn.get("name"):
+                            tool_calls.append(fn["name"])
+                if choice.get("finish_reason"):
+                    stop_reason = choice["finish_reason"]
+
+        except json.JSONDecodeError:
+            continue
+
+    record["input_tokens"] = input_tok
+    record["output_tokens"] = output_tok
+    record["stop_reason"] = stop_reason
+    record["stream"] = "true"
+
+    record["estimated_cost_usd"] = 0.0
+
+    if text_chunks:
+        record["assistant_msg_preview"] = "".join(text_chunks)[:300].replace("\n", " ").replace(",", ";")
+
+    if tool_calls:
+        existing = json.loads(record.get("tool_calls", "[]"))
+        record["tool_calls"] = json.dumps(list(set(existing + tool_calls)))
+        record["tool_call_count"] = len(json.loads(record["tool_calls"]))
+
+    return record
+
+
+def parse_google_response(body: dict, record: dict) -> dict:
+    """Parse a Google Gemini API response body and populate record fields."""
+    # Usage metadata
+    usage = body.get("usageMetadata", {})
+    record["input_tokens"] = usage.get("promptTokenCount", 0)
+    record["output_tokens"] = usage.get("candidatesTokenCount", 0)
+    record["model"] = record["model"] or body.get("modelVersion", "")
+
+    record["estimated_cost_usd"] = 0.0
+
+    # Extract content from candidates
+    text_parts, tool_calls = [], []
+    stop_reason = ""
+    for candidate in body.get("candidates", []):
+        content = candidate.get("content", {})
+        for part in content.get("parts", []):
+            if part.get("text"):
+                text_parts.append(part["text"])
+            if part.get("functionCall"):
+                tool_calls.append(part["functionCall"].get("name", ""))
+        stop_reason = candidate.get("finishReason", "") or stop_reason
+
+    record["stop_reason"] = stop_reason
+    record["assistant_msg_preview"] = " ".join(text_parts)[:300].replace("\n", " ").replace(",", ";")
+
+    if tool_calls:
+        existing = json.loads(record.get("tool_calls", "[]"))
+        record["tool_calls"] = json.dumps(list(set(existing + tool_calls)))
+        record["tool_call_count"] = len(json.loads(record["tool_calls"]))
+
+    return record
+
+
+# ─────────────────────────────────────────────
+# SERVICE PARSER DISPATCH MAPS
+# ─────────────────────────────────────────────
+
+SERVICE_PARSERS_REQUEST = {
+    "anthropic_api": parse_request_body,
+    "openai_api": parse_openai_request,
+    "groq_api": parse_openai_request,
+    "together_api": parse_openai_request,
+    "deepseek_api": parse_openai_request,
+    "openrouter_api": parse_openai_request,
+    "xai_grok_api": parse_openai_request,
+    "azure_openai": parse_openai_request,
+    "fireworks_api": parse_openai_request,
+    "mistral_api": parse_openai_request,
+}
+
+SERVICE_PARSERS_RESPONSE = {
+    "anthropic_api": (parse_response_body, parse_sse_response),
+    "openai_api": (parse_openai_response, parse_openai_sse_response),
+    "groq_api": (parse_openai_response, parse_openai_sse_response),
+    "together_api": (parse_openai_response, parse_openai_sse_response),
+    "deepseek_api": (parse_openai_response, parse_openai_sse_response),
+    "openrouter_api": (parse_openai_response, parse_openai_sse_response),
+    "xai_grok_api": (parse_openai_response, parse_openai_sse_response),
+    "azure_openai": (parse_openai_response, parse_openai_sse_response),
+    "fireworks_api": (parse_openai_response, parse_openai_sse_response),
+    "mistral_api": (parse_openai_response, parse_openai_sse_response),
+    "gemini_api": (parse_google_response, None),
+}
 
 
 def get_csv_path() -> Path:
@@ -371,11 +590,13 @@ try:
             }
             record["_start_time"] = time.time()
 
-            # Parse Anthropic API request body
-            if "api.anthropic.com" in host and flow.request.method == "POST":
+            # Parse request body using service-specific parser
+            service = record["destination_service"]
+            req_parser = SERVICE_PARSERS_REQUEST.get(service)
+            if req_parser and flow.request.method == "POST":
                 try:
                     body = json.loads(flow.request.content)
-                    record = parse_request_body(body, record)
+                    record = req_parser(body, record)
                     record["raw_request_hash"] = hashlib.sha256(flow.request.content).hexdigest()[:12]
                 except Exception:
                     pass
@@ -393,16 +614,18 @@ try:
             record["response_size_bytes"] = len(flow.response.content or b"")
             record["request_id"] = flow.response.headers.get("x-request-id", "")
 
-            # Parse Anthropic API response
-            if "api.anthropic.com" in flow.request.host:
+            # Parse response using service-specific parser
+            service = record.get("destination_service", "")
+            resp_parsers = SERVICE_PARSERS_RESPONSE.get(service)
+            if resp_parsers:
                 try:
-                    # Handle streamed responses (SSE)
                     raw = flow.response.content.decode("utf-8", errors="replace")
-                    if raw.startswith("data:"):
-                        record = parse_sse_response(raw, record)
-                    else:
+                    json_parser, sse_parser = resp_parsers
+                    if sse_parser and raw.startswith("data:"):
+                        record = sse_parser(raw, record)
+                    elif json_parser:
                         body = json.loads(raw)
-                        record = parse_response_body(body, record)
+                        record = json_parser(body, record)
                 except Exception:
                     pass
 
@@ -424,7 +647,6 @@ try:
             model = record.get("model", "")
             in_tok = record.get("input_tokens", 0)
             out_tok = record.get("output_tokens", 0)
-            cost = record.get("estimated_cost_usd", 0)
             latency = record.get("latency_ms", 0)
             tools = json.loads(record.get("tool_calls", "[]"))
             sensitive = record.get("sensitive_patterns", "")
@@ -442,7 +664,7 @@ try:
                 f"  {icon} [{turn:03d}] {svc:<22} {status}  "
                 f"{model_short:<8}  "
                 f"↑{in_tok:>5}t ↓{out_tok:>5}t  "
-                f"${cost:.4f}  {latency:>5}ms",
+                f"{latency:>5}ms",
                 end="",
             )
 
@@ -649,7 +871,6 @@ def run_analyze(sessions_dir: Optional[str] = None):
 
     total_turns = len(rows)
     api_rows = [r for r in rows if r.get("destination_service") == "anthropic_api"]
-    total_cost = sum(float(r.get("estimated_cost_usd", 0)) for r in api_rows)
     total_in_tok = sum(int(r.get("input_tokens", 0)) for r in api_rows)
     total_out_tok = sum(int(r.get("output_tokens", 0)) for r in api_rows)
     total_req_bytes = sum(int(r.get("request_size_bytes", 0)) for r in rows)
@@ -673,7 +894,6 @@ def run_analyze(sessions_dir: Optional[str] = None):
     print(f"  Anthropic API calls        : {len(api_rows)}")
     print(f"  Input tokens               : {total_in_tok:,}")
     print(f"  Output tokens              : {total_out_tok:,}")
-    print(f"  Estimated cost             : ${total_cost:.4f}")
     print(f"  Total data sent            : {total_req_bytes / 1024:.1f} KB")
     print(f"  Total data received        : {total_res_bytes / 1024:.1f} KB")
     print(f"  ⚠️  Sensitive pattern hits  : {len(sensitive_rows)}")
@@ -748,15 +968,14 @@ def run_plot(sessions_dir: Optional[str] = None):
 
     input_tokens = [int(r.get("input_tokens", 0)) for r in rows]
     output_tokens = [int(r.get("output_tokens", 0)) for r in rows]
-    costs = [float(r.get("estimated_cost_usd", 0)) for r in rows]
     latencies = [int(r.get("latency_ms", 0)) for r in rows]
     req_sizes = [int(r.get("request_size_bytes", 0)) for r in rows]
     res_sizes = [int(r.get("response_size_bytes", 0)) for r in rows]
-    cumulative_cost = []
-    running = 0.0
-    for c in costs:
-        running += c
-        cumulative_cost.append(running)
+    cumulative_tokens = []
+    running = 0
+    for it, ot in zip(input_tokens, output_tokens):
+        running += it + ot
+        cumulative_tokens.append(running)
 
     services = [r.get("destination_service", "unknown") for r in rows]
     models = [r.get("model", "unknown") or "unknown" for r in rows]
@@ -799,7 +1018,7 @@ def run_plot(sessions_dir: Optional[str] = None):
     colors = {
         "input": "#4A90D9",
         "output": "#E8744F",
-        "cost": "#50C878",
+        "cumulative": "#50C878",
         "latency": "#9B59B6",
         "sent": "#E74C3C",
         "recv": "#3498DB",
@@ -818,23 +1037,23 @@ def run_plot(sessions_dir: Optional[str] = None):
     ax1.legend(loc="upper left", fontsize=8)
     ax1.grid(True, alpha=0.3)
 
-    # 2) Cumulative cost
+    # 2) Cumulative tokens
     ax2 = fig.add_subplot(gs[0, 1])
-    ax2.plot(range(len(rows)), cumulative_cost, color=colors["cost"], linewidth=2, label="Cumulative Cost")
-    ax2.fill_between(range(len(rows)), cumulative_cost, alpha=0.2, color=colors["cost"])
-    ax2.set_title("Cumulative Cost (USD)", fontweight="bold")
+    ax2.plot(range(len(rows)), cumulative_tokens, color=colors["cumulative"], linewidth=2, label="Cumulative Tokens")
+    ax2.fill_between(range(len(rows)), cumulative_tokens, alpha=0.2, color=colors["cumulative"])
+    ax2.set_title("Cumulative Tokens", fontweight="bold")
     ax2.set_xlabel("Turn #")
-    ax2.set_ylabel("USD")
+    ax2.set_ylabel("Tokens")
     ax2.legend(fontsize=8)
     ax2.grid(True, alpha=0.3)
-    # Annotate final cost
-    if cumulative_cost:
+    # Annotate final total
+    if cumulative_tokens:
         ax2.annotate(
-            f"${cumulative_cost[-1]:.4f}",
-            xy=(len(rows) - 1, cumulative_cost[-1]),
+            f"{cumulative_tokens[-1]:,}",
+            xy=(len(rows) - 1, cumulative_tokens[-1]),
             fontsize=10,
             fontweight="bold",
-            color=colors["cost"],
+            color=colors["cumulative"],
             ha="right",
         )
 
@@ -975,12 +1194,13 @@ def run_plot(sessions_dir: Optional[str] = None):
     ax8.set_yticks([])
     ax8.grid(True, alpha=0.3, axis="x")
 
-    # 9) Cost per turn (bar) — bottom left
+    # 9) Tokens per turn (bar) — bottom left
     ax9 = fig.add_subplot(gs[3, 0])
-    ax9.bar(range(len(rows)), costs, color=colors["cost"], alpha=0.8, width=1.0)
-    ax9.set_title("Cost Per Turn (USD)", fontweight="bold")
+    tokens_per_turn = [it + ot for it, ot in zip(input_tokens, output_tokens)]
+    ax9.bar(range(len(rows)), tokens_per_turn, color=colors["cumulative"], alpha=0.8, width=1.0)
+    ax9.set_title("Tokens Per Turn", fontweight="bold")
     ax9.set_xlabel("Turn #")
-    ax9.set_ylabel("USD")
+    ax9.set_ylabel("Tokens")
     ax9.grid(True, alpha=0.3)
 
     # 10) Latency per turn (scatter, colored by service)
@@ -1003,7 +1223,6 @@ def run_plot(sessions_dir: Optional[str] = None):
     total_turns = len(rows)
     api_count = sum(1 for s in services if "api" in s)
     tel_count = sum(1 for s in services if "telemetry" in s or "reporting" in s)
-    total_cost_val = sum(costs)
     total_in = sum(input_tokens)
     total_out = sum(output_tokens)
     avg_lat = sum(latencies) / len(latencies) if latencies else 0
@@ -1016,7 +1235,6 @@ def run_plot(sessions_dir: Optional[str] = None):
         f"{'─' * 35}\n"
         f"Input tokens:       {total_in:,}\n"
         f"Output tokens:      {total_out:,}\n"
-        f"Total cost:         ${total_cost_val:.4f}\n"
         f"{'─' * 35}\n"
         f"Avg latency:        {avg_lat:.0f}ms\n"
         f"Data sent:          {total_sent:.2f} MB\n"
@@ -1319,7 +1537,6 @@ def run_generate_test():
         in_tok = random.randint(1000, 80000)
         out_tok = random.randint(100, 4000)
         model = models[i]
-        cost = estimate_cost(model, in_tok, out_tok, random.randint(0, 5000), random.randint(0, 2000))
         service = services[i]
         tools_json = random.choice(tool_sets)
         tools_list = json.loads(tools_json)
@@ -1364,7 +1581,7 @@ def run_generate_test():
             "output_tokens": out_tok if "api" in service else 0,
             "cache_read_tokens": random.randint(0, 5000),
             "cache_write_tokens": random.randint(0, 2000),
-            "estimated_cost_usd": cost if "api" in service else 0,
+            "estimated_cost_usd": 0,
             "request_size_bytes": random.randint(5000, 500000),
             "response_size_bytes": random.randint(1000, 200000),
             "latency_ms": random.randint(800, 8000),
@@ -1466,6 +1683,7 @@ def run_configure(agent):
         print("\nSupported agents:")
         agents = {
             "claude_code": ("~/.zshrc or ~/.bashrc", "shell_rc"),
+            "claude_desktop": ("Wrapper script (macOS only)", "wrapper_script"),
             "cursor": ("VS Code settings.json", "app_config"),
             "aider": ("~/.zshrc or ~/.bashrc", "shell_rc"),
         }
@@ -1506,6 +1724,38 @@ export NODE_EXTRA_CA_CERTS="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
 
         print(f"Proxy configured in {target}")
         print(f"Restart your shell or run: source {target}")
+    elif agent == "claude_desktop":
+        import platform
+
+        if platform.system() != "Darwin":
+            print("Claude Desktop proxy configuration is currently macOS only.")
+            return
+
+        output_dir = get_output_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        script_path = output_dir / "claude-desktop-proxy.sh"
+        cert_path = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
+
+        script_content = f"""#!/bin/bash
+# Claude Desktop with AI Runtime Monitor proxy
+# Generated by: claude-watch --configure claude_desktop
+
+export HTTPS_PROXY=http://127.0.0.1:{port}
+export HTTP_PROXY=http://127.0.0.1:{port}
+export NODE_EXTRA_CA_CERTS="{cert_path}"
+
+# Launch Claude Desktop
+open -a "Claude"
+"""
+        script_path.write_text(script_content)
+        script_path.chmod(0o755)
+
+        print(f"\nClaude Desktop proxy wrapper created at: {script_path}")
+        print("\nUsage:")
+        print("  1. Start the proxy:  claude-watch --start")
+        print(f"  2. Launch Claude Desktop:  {script_path}")
+        print("\nOr add an alias:")
+        print(f'  alias claude-desktop="{script_path}"')
     else:
         print(f"Agent '{agent}' configuration not yet supported.")
 

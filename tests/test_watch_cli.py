@@ -62,7 +62,7 @@ def _sample_row(overrides=None):
         "output_tokens": "1000",
         "cache_read_tokens": "100",
         "cache_write_tokens": "50",
-        "estimated_cost_usd": "0.030",
+        "estimated_cost_usd": "0.0",
         "request_size_bytes": "12000",
         "response_size_bytes": "8000",
         "latency_ms": "1500",
@@ -221,14 +221,13 @@ class TestRunAnalyze:
 
         sessions = tmp_path / "sessions"
         rows = [
-            _sample_row({"input_tokens": "5000", "output_tokens": "1000", "estimated_cost_usd": "0.030"}),
+            _sample_row({"input_tokens": "5000", "output_tokens": "1000"}),
             _sample_row(
                 {
                     "turn_number": "2",
                     "turn_id": "t-2",
                     "input_tokens": "3000",
                     "output_tokens": "500",
-                    "estimated_cost_usd": "0.015",
                     "destination_service": "anthropic_api",
                 }
             ),
@@ -242,7 +241,6 @@ class TestRunAnalyze:
         assert "Anthropic API calls" in captured
         assert "Input tokens" in captured
         assert "Output tokens" in captured
-        assert "Estimated cost" in captured
         assert "Total data sent" in captured
         assert "Total data received" in captured
 
@@ -493,7 +491,7 @@ class TestRunDashboard:
                     "model": "gpt-4o",
                     "input_tokens": "3000",
                     "output_tokens": "800",
-                    "estimated_cost_usd": "0.015",
+                    "estimated_cost_usd": "0.0",
                 }
             ),
         ]
@@ -861,7 +859,6 @@ class TestRunAnalyzeEdgeCases:
                     "destination_service": "anthropic_telemetry",
                     "input_tokens": "9999",
                     "output_tokens": "9999",
-                    "estimated_cost_usd": "99.0",
                 }
             ),
             _sample_row(
@@ -870,7 +867,6 @@ class TestRunAnalyzeEdgeCases:
                     "destination_service": "anthropic_api",
                     "input_tokens": "100",
                     "output_tokens": "50",
-                    "estimated_cost_usd": "0.001",
                 }
             ),
         ]
@@ -1088,3 +1084,48 @@ class TestDashboardHtml:
         html = _dashboard_html()
         assert isinstance(html, str)
         assert "<html" in html.lower() or "Dashboard" in html
+
+
+# ---------------------------------------------------------------------------
+# Claude Desktop Configure
+# ---------------------------------------------------------------------------
+
+
+class TestConfigureClaudeDesktop:
+    def test_configure_claude_desktop_macos(self, tmp_path, monkeypatch):
+        """Test Claude Desktop proxy config creates wrapper script on macOS."""
+        import platform
+
+        monkeypatch.setattr(platform, "system", lambda: "Darwin")
+        monkeypatch.setattr("claude_monitoring.watch.get_output_dir", lambda: tmp_path)
+        monkeypatch.setattr("claude_monitoring.watch.get_proxy_port", lambda: 9080)
+
+        from claude_monitoring.watch import run_configure
+
+        run_configure("claude_desktop")
+
+        script_path = tmp_path / "claude-desktop-proxy.sh"
+        assert script_path.exists()
+        content = script_path.read_text()
+        assert "HTTPS_PROXY" in content
+        assert "9080" in content
+        assert "NODE_EXTRA_CA_CERTS" in content
+        assert 'open -a "Claude"' in content
+        # Check executable permission
+        import stat
+
+        mode = script_path.stat().st_mode
+        assert mode & stat.S_IXUSR
+
+    def test_configure_claude_desktop_not_macos(self, capsys, monkeypatch):
+        """Test Claude Desktop config warns on non-macOS."""
+        import platform
+
+        monkeypatch.setattr(platform, "system", lambda: "Linux")
+
+        from claude_monitoring.watch import run_configure
+
+        run_configure("claude_desktop")
+
+        captured = capsys.readouterr()
+        assert "macOS only" in captured.out

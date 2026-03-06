@@ -28,7 +28,6 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
 .stat-card:hover { border-color:var(--blue); transform:translateY(-1px); }
 .stat-card .label { font-size:11px; color:var(--text2); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px; }
 .stat-card .value { font-size:24px; font-weight:700; }
-.stat-card .value.cost { color:var(--green); }
 .stat-card .value.alert { color:var(--red); }
 .stat-card .value.blue { color:var(--blue); }
 .stat-card .value.purple { color:var(--purple); }
@@ -183,7 +182,7 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
 .timing-bar-fill { height:6px; border-radius:3px; }
 
 /* API Traffic */
-.traffic-summary { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:16px; }
+.traffic-summary { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:16px; }
 .traffic-card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px; }
 .traffic-card .tc-label { font-size:11px; color:var(--text2); text-transform:uppercase; letter-spacing:0.5px; display:flex; align-items:center; gap:6px; margin-bottom:4px; }
 .traffic-card .tc-value { font-size:22px; font-weight:700; }
@@ -224,6 +223,14 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
         <a onclick="exportData('sessions','ndjson')" style="display:block;padding:6px 12px;color:var(--text);font-size:13px;cursor:pointer;text-decoration:none">Sessions</a>
         <a onclick="exportData('events','ndjson')" style="display:block;padding:6px 12px;color:var(--text);font-size:13px;cursor:pointer;text-decoration:none">Events</a>
         <a onclick="exportData('alerts','ndjson')" style="display:block;padding:6px 12px;color:var(--text);font-size:13px;cursor:pointer;text-decoration:none">Alerts</a>
+        <div style="border-top:1px solid var(--border);margin:4px 0"></div>
+        <div style="padding:4px 12px;font-size:11px;color:var(--text2);text-transform:uppercase">CSV</div>
+        <a onclick="exportData('sessions','csv')" style="display:block;padding:6px 12px;color:var(--text);font-size:13px;cursor:pointer;text-decoration:none">Sessions</a>
+        <a onclick="exportData('traffic','csv')" style="display:block;padding:6px 12px;color:var(--text);font-size:13px;cursor:pointer;text-decoration:none">Traffic</a>
+        <div style="border-top:1px solid var(--border);margin:4px 0"></div>
+        <div style="padding:4px 12px;font-size:11px;color:var(--text2);text-transform:uppercase">Reports</div>
+        <a onclick="window.open(API+'/api/report?days=7&format=html','_blank')" style="display:block;padding:6px 12px;color:var(--text);font-size:13px;cursor:pointer;text-decoration:none">Weekly Report (HTML)</a>
+        <a onclick="window.location.href=API+'/api/report?days=7&format=markdown'" style="display:block;padding:6px 12px;color:var(--text);font-size:13px;cursor:pointer;text-decoration:none">Weekly Report (Markdown)</a>
       </div>
     </div>
     <div class="status"><div class="dot"></div><span style="font-size:12px;color:var(--text2)">Monitoring</span></div>
@@ -235,9 +242,8 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
   <div class="stat-card" onclick="switchTab('system')"><div class="label">Active Agents</div><div class="value" id="st-agents">-</div></div>
   <div class="stat-card" onclick="switchTab('analytics')"><div class="label">Input Tokens</div><div class="value" id="st-input">-</div></div>
   <div class="stat-card" onclick="switchTab('analytics')"><div class="label">Output Tokens</div><div class="value" id="st-output">-</div></div>
-  <div class="stat-card" onclick="switchTab('analytics')"><div class="label" id="st-cost-label">Total Cost</div><div class="value cost" id="st-cost">-</div></div>
   <div class="stat-card" onclick="switchTab('analytics')"><div class="label">Burn Rate</div><div class="value" id="st-burnrate" style="font-size:18px">-</div></div>
-  <div class="stat-card" onclick="switchTab('explorer')"><div class="label">Browser AI</div><div class="value purple" id="st-browser">-</div></div>
+  <div class="stat-card" onclick="document.getElementById('session-source').value='browser';switchTab('explorer');loadSessions()"><div class="label">Browser AI</div><div class="value purple" id="st-browser">-</div></div>
   <div class="stat-card" onclick="switchTab('alerts')"><div class="label">Alerts</div><div class="value alert" id="st-alerts">-</div></div>
 </div>
 
@@ -245,6 +251,7 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
   <div class="tab active" data-tab="explorer">Session Explorer</div>
   <div class="tab" data-tab="feed">Live Feed</div>
   <div class="tab" data-tab="analytics">Analytics</div>
+  <div class="tab" data-tab="insights">Insights</div>
   <div class="tab" data-tab="system">System</div>
   <div class="tab" data-tab="traffic">API Traffic</div>
   <div class="tab" data-tab="timeline">Activity Timeline</div>
@@ -293,11 +300,46 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
   <div class="panel" id="panel-analytics">
     <div class="charts">
       <div class="chart-card"><h3>Token Usage (24h)</h3><canvas id="chart-tokens"></canvas></div>
-      <div class="chart-card"><h3>Cost Over Time (24h)</h3><canvas id="chart-cost"></canvas></div>
       <div class="chart-card"><h3>Tool Usage</h3><canvas id="chart-tools"></canvas></div>
       <div class="chart-card"><h3>Model Usage</h3><canvas id="chart-models"></canvas></div>
       <div class="chart-card charts-full"><h3>Daily Token Burn Rate (14 days) <span id="forecast-label" style="font-weight:normal;font-size:12px;color:var(--text2)"></span></h3><canvas id="chart-burnrate"></canvas></div>
       <div class="chart-card charts-full"><h3>Browser AI Usage (7 days)</h3><canvas id="chart-browser"></canvas></div>
+      <div class="chart-card"><h3>MCP Server Usage</h3><canvas id="chart-mcp"></canvas></div>
+      <div class="chart-card"><h3>MCP Servers Discovered</h3><div id="mcp-server-list" style="font-size:13px;max-height:260px;overflow-y:auto"></div></div>
+    </div>
+  </div>
+
+  <!-- Insights -->
+  <div class="panel" id="panel-insights">
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:16px">
+      <select id="insights-period" onchange="loadInsights()" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:6px 10px;color:var(--text);font-size:13px;cursor:pointer">
+        <option value="7d">Last 7 days</option>
+        <option value="30d" selected>Last 30 days</option>
+        <option value="90d">Last 90 days</option>
+        <option value="all">All time</option>
+      </select>
+    </div>
+    <div class="stats" id="insights-stats" style="margin-bottom:16px">
+      <div class="stat-card"><div class="label">Sessions</div><div class="value blue" id="ins-sessions">-</div></div>
+      <div class="stat-card"><div class="label">Avg Turns</div><div class="value" id="ins-avg-turns">-</div></div>
+      <div class="stat-card"><div class="label">Avg Tok/Turn</div><div class="value" id="ins-avg-tpt">-</div></div>
+      <div class="stat-card"><div class="label">Projects</div><div class="value purple" id="ins-projects">-</div></div>
+    </div>
+    <div class="charts">
+      <div class="chart-card"><h3>Top Tools (All Sessions)</h3><canvas id="chart-ins-tools"></canvas></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+      <div class="system-section">
+        <h3>Projects</h3>
+        <table class="data-table">
+          <thead><tr><th>Project</th><th>Sessions</th><th>Turns</th><th>Tokens</th></tr></thead>
+          <tbody id="ins-projects-tbody"></tbody>
+        </table>
+      </div>
+      <div class="system-section">
+        <h3>Most-Read Files</h3>
+        <div id="ins-files-list" style="max-height:300px;overflow-y:auto;font-size:13px"></div>
+      </div>
     </div>
   </div>
 
@@ -332,7 +374,6 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
   <div class="panel" id="panel-traffic">
     <div class="traffic-summary">
       <div class="traffic-card"><div class="tc-label">&#x1f310; Total API Calls</div><div class="tc-value" id="traffic-total">-</div></div>
-      <div class="traffic-card"><div class="tc-label">&#x1f4b2; Total Cost</div><div class="tc-value" id="traffic-cost" style="color:var(--green)">-</div></div>
       <div class="traffic-card"><div class="tc-label">&#x23f1; Avg Latency</div><div class="tc-value" id="traffic-latency">-</div></div>
       <div class="traffic-card"><div class="tc-label">&#x26a0; Sensitive Calls</div><div class="tc-value" id="traffic-sensitive" style="color:var(--red)">-</div></div>
     </div>
@@ -346,7 +387,6 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
             <th onclick="sortTraffic('model')">Model <span class="sort-arrow" id="sort-model"></span></th>
             <th onclick="sortTraffic('input_tokens')">Input Tokens <span class="sort-arrow" id="sort-input_tokens"></span></th>
             <th onclick="sortTraffic('output_tokens')">Output Tokens <span class="sort-arrow" id="sort-output_tokens"></span></th>
-            <th onclick="sortTraffic('cost')">Cost <span class="sort-arrow" id="sort-cost"></span></th>
             <th onclick="sortTraffic('latency')">Latency <span class="sort-arrow" id="sort-latency"></span></th>
             <th onclick="sortTraffic('status')">Status <span class="sort-arrow" id="sort-status"></span></th>
           </tr>
@@ -439,6 +479,8 @@ function switchTab(name) {
   if (tab) tab.classList.add('active');
   document.getElementById('panel-' + name).classList.add('active');
   if (name === 'system') { loadProcesses(); loadConnections(); loadFiles(); }
+  if (name === 'analytics') { loadMCPStats(); }
+  if (name === 'insights') { loadInsights(); }
   if (name === 'traffic') { loadTraffic(true); }
   if (name === 'timeline') { loadTimeline(); }
   if (name === 'alerts') { loadAlerts(); }
@@ -529,19 +571,7 @@ async function loadStats() {
     document.getElementById('st-output').textContent = fmtNum(d.total_output_tokens);
     document.getElementById('st-alerts').textContent = d.total_alerts;
 
-    // Plan-aware cost display
     currentPlanInfo = d.plan_info || {};
-    const costLabel = document.getElementById('st-cost-label');
-    const costValue = document.getElementById('st-cost');
-    if (currentPlanInfo.is_subscription) {
-      costLabel.textContent = currentPlanInfo.cost_label || 'Subscription';
-      costValue.textContent = fmtNum(d.total_input_tokens + d.total_output_tokens) + ' tok';
-      costValue.className = 'value green';
-    } else {
-      costLabel.textContent = 'Total Cost';
-      costValue.textContent = '$' + d.total_cost.toFixed(2);
-      costValue.className = 'value cost';
-    }
 
     // Browser AI
     const browserEl = document.getElementById('st-browser');
@@ -691,11 +721,10 @@ async function loadSessionDetail(id) {
           html += '<div class="event-block token_usage collapsed">'
             + '<div class="event-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">'
             + '<span>&#x1f4ca; Tokens: &#x2191;'+fmtNum(data.input_tokens||0)+' in &#x2193;'+fmtNum(data.output_tokens||0)+' out'
-            + (currentPlanInfo.is_subscription ? '' : ' &middot; $'+(data.cost||0).toFixed(4))+'</span></div>'
+            +'</span></div>'
             + '<div class="event-body"><pre>Model: '+esc(data.model)
             + '\nInput: '+data.input_tokens+' (cache read: '+(data.cache_read_tokens||0)+', cache write: '+(data.cache_write_tokens||0)+')'
             + '\nOutput: '+data.output_tokens
-            + (currentPlanInfo.is_subscription ? '' : '\nCost: $'+(data.cost||0).toFixed(6))
             + '\nStop reason: '+esc(data.stop_reason||'')+'</pre></div></div>';
           break;
         case 'sensitive_data':
@@ -764,7 +793,7 @@ async function pollFeed() {
 
 // Charts
 function updateCharts(stats) {
-  const chartOpts = {responsive:true,plugins:{legend:{labels:{color:'#e6edf3'}},tooltip:{callbacks:{label:(ctx)=>ctx.dataset.label+': '+fmtNum(ctx.raw)+(ctx.dataset.label.toLowerCase().includes('cost')?' $':' tokens')}}}};
+  const chartOpts = {responsive:true,plugins:{legend:{labels:{color:'#e6edf3'}},tooltip:{callbacks:{label:(ctx)=>ctx.dataset.label+': '+fmtNum(ctx.raw)+' tokens'}}}};
   // Token timeline
   const tl = stats.token_timeline || [];
   const labels = tl.map(t => {
@@ -781,22 +810,6 @@ function updateCharts(stats) {
           {label:'Output',data:tl.map(t=>t.output_t||0),backgroundColor:'rgba(63,185,80,0.7)'}
         ]
       }, options:{...chartOpts,scales:{x:{stacked:true,ticks:{color:'#8b949e'}},y:{stacked:true,ticks:{color:'#8b949e'}}}}
-    });
-  }
-
-  if (charts.cost) charts.cost.destroy();
-  if (tl.length && !currentPlanInfo.is_subscription) {
-    charts.cost = new Chart(document.getElementById('chart-cost'), {
-      type:'line', data:{
-        labels, datasets:[{label:'Cost ($)',data:tl.map(t=>t.cost||0),borderColor:'#3fb950',backgroundColor:'rgba(63,185,80,0.1)',fill:true,tension:0.3}]
-      }, options:{...chartOpts,scales:{x:{ticks:{color:'#8b949e'}},y:{ticks:{color:'#8b949e'}}}}
-    });
-  } else if (tl.length) {
-    // For subscription users, show token volume instead of cost
-    charts.cost = new Chart(document.getElementById('chart-cost'), {
-      type:'line', data:{
-        labels, datasets:[{label:'Tokens (included in plan)',data:tl.map(t=>(t.input_t||0)+(t.output_t||0)),borderColor:'#3fb950',backgroundColor:'rgba(63,185,80,0.1)',fill:true,tension:0.3}]
-      }, options:{...chartOpts,scales:{x:{ticks:{color:'#8b949e'}},y:{ticks:{color:'#8b949e'}}}}
     });
   }
 
@@ -1399,7 +1412,6 @@ async function loadTraffic(reset) {
     const statsR = await fetch(API + '/api/traffic/stats');
     const stats = await statsR.json();
     document.getElementById('traffic-total').textContent = fmtNum(stats.total_calls || 0);
-    document.getElementById('traffic-cost').textContent = '$' + (stats.total_cost || 0).toFixed(2);
     document.getElementById('traffic-latency').textContent = (stats.avg_latency || 0).toFixed(0) + 'ms';
     document.getElementById('traffic-sensitive').textContent = stats.sensitive_calls || stats.total_sensitive || 0;
 
@@ -1433,15 +1445,14 @@ async function loadTraffic(reset) {
 function renderTrafficTable() {
   const tbody = document.getElementById('traffic-tbody');
   if (!trafficData.length) {
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text2);padding:32px">No API traffic data available</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:32px">No API traffic data available</td></tr>';
     return;
   }
 
   tbody.innerHTML = trafficData.map(function(c, idx) {
-    // Normalize field names (DB uses http_status/destination_service/estimated_cost_usd/latency_ms)
+    // Normalize field names (DB uses http_status/destination_service/latency_ms)
     var status = String(c.http_status || c.status || '');
     var service = c.destination_service || c.service || '-';
-    var cost = c.estimated_cost_usd || c.cost || 0;
     var latency = c.latency_ms || c.latency || 0;
     var tools = c.tool_calls;
     if (typeof tools === 'string') { try { tools = JSON.parse(tools); } catch(e) { tools = []; } }
@@ -1458,7 +1469,6 @@ function renderTrafficTable() {
       + '<td>' + esc((c.model || '-').replace('claude-', '')) + '</td>'
       + '<td>' + fmtNum(c.input_tokens || 0) + '</td>'
       + '<td>' + fmtNum(c.output_tokens || 0) + '</td>'
-      + '<td>$' + cost.toFixed(4) + '</td>'
       + '<td>' + latency.toFixed(0) + 'ms</td>'
       + '<td><span style="color:' + statusColor + '">' + esc(status || '-') + '</span>'
       + (hasSensitive ? ' <span style="color:var(--red)">&#x26a0;</span>' : '') + '</td>'
@@ -1473,7 +1483,7 @@ function renderTrafficTable() {
       : '<span style="color:var(--text2)">-</span>';
 
     const detailRow = '<tr class="traffic-row-detail" id="traffic-detail-' + idx + '">'
-      + '<td colspan="8"><div class="traffic-detail-grid">'
+      + '<td colspan="7"><div class="traffic-detail-grid">'
       + '<div><div class="td-label">Last User Message</div><div class="td-value" style="max-height:80px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;font-family:monospace">' + esc(c.last_user_msg_preview || '-') + '</div></div>'
       + '<div><div class="td-label">Assistant Response</div><div class="td-value" style="max-height:80px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;font-family:monospace">' + esc(c.assistant_msg_preview || '-') + '</div></div>'
       + '<div><div class="td-label">Tool Calls</div><div class="td-value">' + toolsList + '</div></div>'
@@ -1506,6 +1516,84 @@ function sortTraffic(col) {
   if (arrow) arrow.innerHTML = trafficSortDir === 'desc' ? '&#x25BC;' : '&#x25B2;';
 
   loadTraffic(true);
+}
+
+// MCP Stats
+async function loadMCPStats() {
+  try {
+    const r = await fetch(API + '/api/mcp/stats');
+    const d = await r.json();
+
+    // Doughnut chart
+    if (charts.mcp) charts.mcp.destroy();
+    if (d.servers && d.servers.length) {
+      const colors = ['#58a6ff','#3fb950','#d29922','#f85149','#bc8cff','#39d2c0','#f0883e','#a5d6ff'];
+      charts.mcp = new Chart(document.getElementById('chart-mcp'), {
+        type:'doughnut', data:{
+          labels:d.servers.map(s=>s.server),
+          datasets:[{data:d.servers.map(s=>s.call_count),backgroundColor:d.servers.map((_,i)=>colors[i%colors.length])}]
+        }, options:{responsive:true,plugins:{legend:{position:'right',labels:{color:'#e6edf3',font:{size:11}}}}}
+      });
+    }
+
+    // Server list
+    const listEl = document.getElementById('mcp-server-list');
+    if (d.servers && d.servers.length) {
+      listEl.innerHTML = d.servers.map(s =>
+        '<div style="padding:6px 0;border-bottom:1px solid var(--border)">'
+        + '<strong style="color:var(--blue)">'+esc(s.server)+'</strong>'
+        + ' <span style="color:var(--text2)">'+s.call_count+' calls, '+s.session_count+' sessions</span>'
+        + '<div style="font-size:11px;color:var(--text2);margin-top:2px">Methods: '+esc(s.methods.join(', '))+'</div>'
+        + '</div>'
+      ).join('');
+    } else {
+      listEl.innerHTML = '<div style="color:var(--text2);padding:12px">No MCP servers detected yet</div>';
+    }
+  } catch(e) {}
+}
+
+// Insights
+async function loadInsights() {
+  const period = document.getElementById('insights-period').value;
+  try {
+    const r = await fetch(API + '/api/insights?period=' + period);
+    const d = await r.json();
+
+    document.getElementById('ins-sessions').textContent = d.total_sessions;
+    document.getElementById('ins-avg-turns').textContent = d.efficiency.avg_turns_per_session;
+    document.getElementById('ins-avg-tpt').textContent = fmtNum(d.efficiency.avg_tokens_per_turn);
+    document.getElementById('ins-projects').textContent = d.total_projects;
+
+    // Top tools
+    if (charts.insTools) charts.insTools.destroy();
+    if (d.top_tools && d.top_tools.length) {
+      charts.insTools = new Chart(document.getElementById('chart-ins-tools'), {
+        type:'bar', data:{
+          labels:d.top_tools.map(t=>t.tool||'?'),
+          datasets:[{label:'Calls',data:d.top_tools.map(t=>t.count),backgroundColor:'rgba(88,166,255,0.7)'}]
+        }, options:{responsive:true,indexAxis:'y',plugins:{legend:{labels:{color:'#e6edf3'}}},scales:{x:{ticks:{color:'#8b949e'}},y:{ticks:{color:'#e6edf3',font:{size:11}}}}}
+      });
+    }
+
+    // Projects table
+    const tbody = document.getElementById('ins-projects-tbody');
+    tbody.innerHTML = (d.projects || []).map(p =>
+      '<tr><td>'+esc(projectName(p.cwd))+'</td><td>'+p.sessions+'</td><td>'+p.turns+'</td><td>'+fmtNum((p.input_tokens||0)+(p.output_tokens||0))+'</td></tr>'
+    ).join('');
+
+    // Most-read files
+    const filesList = document.getElementById('ins-files-list');
+    if (d.top_files && d.top_files.length) {
+      filesList.innerHTML = d.top_files.map((f,i) =>
+        '<div style="padding:4px 0;border-bottom:1px solid var(--border)">'
+        + '<span style="color:var(--text2)">'+(i+1)+'.</span> '
+        + '<span style="color:var(--blue);word-break:break-all">'+esc(f.file||'')+'</span>'
+        + ' <span style="color:var(--text2)">('+f.count+'x)</span></div>'
+      ).join('');
+    } else {
+      filesList.innerHTML = '<div style="color:var(--text2);padding:12px">No file reads tracked yet</div>';
+    }
+  } catch(e) {}
 }
 </script>
 </body>

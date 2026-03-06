@@ -81,7 +81,7 @@ def _make_record(overrides=None):
             "output_tokens": 1000,
             "cache_read_tokens": 200,
             "cache_write_tokens": 100,
-            "estimated_cost_usd": 0.018,
+            "estimated_cost_usd": 0.0,
             "request_size_bytes": 12000,
             "response_size_bytes": 8000,
             "latency_ms": 1500,
@@ -181,7 +181,6 @@ class TestNewRecord:
             {
                 "input_tokens": 0,
                 "output_tokens": 0,
-                "estimated_cost_usd": 0.0,
                 "latency_ms": 0,
                 "tool_call_count": 0,
                 "sensitive_pattern_count": 0,
@@ -189,7 +188,6 @@ class TestNewRecord:
         )
         assert record["input_tokens"] == 0
         assert record["output_tokens"] == 0
-        assert record["estimated_cost_usd"] == 0.0
         assert record["latency_ms"] == 0
         assert record["tool_call_count"] == 0
         assert record["sensitive_pattern_count"] == 0
@@ -326,13 +324,13 @@ class TestWriteRow:
 
 
 class TestFinalizeRecord:
-    """Test the response finalization logic that computes latency, cost, etc.
+    """Test the response finalization logic that computes latency, etc.
 
     The finalization happens inside the ``response()`` method:
       - pops ``_start_time`` from the record
       - computes ``latency_ms``
       - sets ``http_status``, ``response_size_bytes``, ``request_id``
-      - calls parse_sse_response or parse_response_body (which set cost)
+      - calls parse_sse_response or parse_response_body
     We test the logic by exercising the standalone functions and
     verifying the same computations.
     """
@@ -344,59 +342,6 @@ class TestFinalizeRecord:
         latency_ms = round((time.time() - start) * 1000)
         assert latency_ms >= 40  # allow some timing slack
         assert latency_ms < 500  # sanity upper bound
-
-    def test_estimated_cost_from_parse_response_body(self):
-        """parse_response_body should compute estimated_cost_usd."""
-        from claude_monitoring.watch import parse_response_body
-
-        record = _make_record({"model": "claude-sonnet-4", "estimated_cost_usd": 0.0})
-        body = {
-            "usage": {
-                "input_tokens": 1000,
-                "output_tokens": 500,
-                "cache_read_input_tokens": 0,
-                "cache_creation_input_tokens": 0,
-            },
-            "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": "Hello!"}],
-        }
-        result = parse_response_body(body, record)
-        assert result["estimated_cost_usd"] > 0
-        assert result["input_tokens"] == 1000
-        assert result["output_tokens"] == 500
-        assert result["stop_reason"] == "end_turn"
-
-    def test_estimated_cost_from_parse_sse_response(self):
-        """parse_sse_response should compute estimated_cost_usd from SSE stream."""
-        from claude_monitoring.watch import parse_sse_response
-
-        sse_data = (
-            'data: {"type":"message_start","message":{"model":"claude-sonnet-4","usage":{"input_tokens":2000,"cache_read_input_tokens":100,"cache_creation_input_tokens":50}}}\n'
-            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}\n'
-            'data: {"type":"message_delta","usage":{"output_tokens":800},"delta":{"stop_reason":"end_turn"}}\n'
-        )
-        record = _make_record({"model": "", "estimated_cost_usd": 0.0})
-        result = parse_sse_response(sse_data, record)
-        assert result["estimated_cost_usd"] > 0
-        assert result["input_tokens"] == 2000
-        assert result["output_tokens"] == 800
-        assert result["cache_read_tokens"] == 100
-        assert result["cache_write_tokens"] == 50
-        assert result["stop_reason"] == "end_turn"
-
-    def test_cost_zero_when_no_tokens(self):
-        """Zero tokens should yield zero cost."""
-        from claude_monitoring.utils import estimate_cost
-
-        assert estimate_cost("claude-sonnet-4", 0, 0) == 0.0
-
-    def test_cost_with_cache_tokens(self):
-        """Cache tokens should contribute to cost."""
-        from claude_monitoring.utils import estimate_cost
-
-        cost_no_cache = estimate_cost("claude-sonnet-4", 1000, 500)
-        cost_with_cache = estimate_cost("claude-sonnet-4", 1000, 500, cache_read=1000, cache_write=1000)
-        assert cost_with_cache > cost_no_cache
 
     def test_response_sets_status_and_size(self):
         """After response(), http_status and response_size_bytes should be set.
@@ -487,7 +432,7 @@ class TestWatchDashboardHandler:
                 "output_tokens": "1000",
                 "cache_read_tokens": "0",
                 "cache_write_tokens": "0",
-                "estimated_cost_usd": "0.030",
+                "estimated_cost_usd": "0.0",
                 "request_size_bytes": "12000",
                 "response_size_bytes": "8000",
                 "latency_ms": "1500",
@@ -524,7 +469,7 @@ class TestWatchDashboardHandler:
                 "output_tokens": "800",
                 "cache_read_tokens": "0",
                 "cache_write_tokens": "0",
-                "estimated_cost_usd": "0.015",
+                "estimated_cost_usd": "0.0",
                 "request_size_bytes": "8000",
                 "response_size_bytes": "5000",
                 "latency_ms": "900",

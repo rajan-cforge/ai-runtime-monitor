@@ -71,7 +71,7 @@ class TestEnsureSession:
 
         row = db.execute("SELECT * FROM sessions WHERE session_id='sess-1'").fetchone()
         assert row is not None
-        # session_id, start_time, cwd, model, total_cost, total_input_tokens,
+        # session_id, start_time, cwd, model, total_input_tokens,
         # total_output_tokens, total_turns, jsonl_path, last_activity, title
         assert row[0] == "sess-1"
         assert row[1] == "2026-01-01T00:00:00Z"
@@ -127,14 +127,6 @@ class TestUpdateSessionStats:
         row = db.execute("SELECT model FROM sessions WHERE session_id='stats-1'").fetchone()
         assert row[0] == "claude-sonnet-4"
 
-    def test_increment_cost(self, watcher, db):
-        self._seed(watcher)
-        watcher._update_session_stats("stats-1", cost=0.005)
-        watcher._update_session_stats("stats-1", cost=0.010)
-
-        row = db.execute("SELECT total_cost FROM sessions WHERE session_id='stats-1'").fetchone()
-        assert abs(row[0] - 0.015) < 1e-9
-
     def test_increment_tokens(self, watcher, db):
         self._seed(watcher)
         watcher._update_session_stats("stats-1", input_tokens=100, output_tokens=50)
@@ -165,18 +157,17 @@ class TestUpdateSessionStats:
     def test_combined_update(self, watcher, db):
         self._seed(watcher)
         watcher._update_session_stats(
-            "stats-1", model="claude-opus-4", cost=0.05, input_tokens=500, output_tokens=100, is_turn=True
+            "stats-1", model="claude-opus-4", input_tokens=500, output_tokens=100, is_turn=True
         )
 
         row = db.execute(
-            "SELECT model, total_cost, total_input_tokens, total_output_tokens, total_turns "
+            "SELECT model, total_input_tokens, total_output_tokens, total_turns "
             "FROM sessions WHERE session_id='stats-1'"
         ).fetchone()
         assert row[0] == "claude-opus-4"
-        assert abs(row[1] - 0.05) < 1e-9
-        assert row[2] == 500
-        assert row[3] == 100
-        assert row[4] == 1
+        assert row[1] == 500
+        assert row[2] == 100
+        assert row[3] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -258,8 +249,8 @@ class TestMakeSummary:
         assert summary == "result (1234 chars)"
 
     def test_token_usage(self, watcher):
-        summary = watcher._make_summary("token_usage", {"input_tokens": 100, "output_tokens": 50, "cost": 0.0012})
-        assert summary == "\u2191100t \u219350t $0.0012"
+        summary = watcher._make_summary("token_usage", {"input_tokens": 100, "output_tokens": 50})
+        assert summary == "\u2191100t \u219350t"
 
     def test_sensitive_data(self, watcher):
         summary = watcher._make_summary(
@@ -281,7 +272,7 @@ class TestMakeSummary:
 class TestCheckSensitive:
     def test_aws_key_creates_alert(self, watcher, db):
         watcher._ensure_session("sens-1", "/tmp/s.jsonl")
-        watcher._check_sensitive("AKIAIOSFODNN7EXAMPLE credentials", "sens-1", "2026-01-01T00:00:00Z", "user_prompt")
+        watcher._check_sensitive("AKIAI44QH8DHBR3XYZAB credentials", "sens-1", "2026-01-01T00:00:00Z", "user_prompt")
         db.commit()
 
         rows = db.execute(
@@ -312,7 +303,7 @@ class TestCheckSensitive:
     def test_multiple_patterns_detected(self, watcher, db):
         """Text with multiple sensitive patterns creates one event with all patterns."""
         watcher._ensure_session("sens-5", "/tmp/s.jsonl")
-        text = "AKIAIOSFODNN7EXAMPLE and -----BEGIN RSA PRIVATE KEY-----"
+        text = "AKIAI44QH8DHBR3XYZAB and -----BEGIN RSA PRIVATE KEY-----"
         watcher._check_sensitive(text, "sens-5", "2026-01-01T00:00:00Z", "tool_result")
         db.commit()
 
@@ -328,7 +319,7 @@ class TestCheckSensitive:
 
     def test_snippet_is_truncated(self, watcher, db):
         watcher._ensure_session("sens-6", "/tmp/s.jsonl")
-        long_text = "AKIAIOSFODNN7EXAMPLE " + "a" * 500
+        long_text = "AKIAI44QH8DHBR3XYZAB " + "a" * 500
         watcher._check_sensitive(long_text, "sens-6", "2026-01-01T00:00:00Z", "user_prompt")
         db.commit()
 
@@ -337,6 +328,57 @@ class TestCheckSensitive:
         ).fetchone()
         data = json.loads(row[0])
         assert len(data["snippet"]) <= 200
+
+    def test_known_example_secret_filtered_out(self, watcher, db):
+        """Known example AWS keys should not trigger alerts."""
+        watcher._ensure_session("sens-ex-1", "/tmp/s.jsonl")
+        watcher._check_sensitive("AKIAIOSFODNN7EXAMPLE in docs", "sens-ex-1", "2026-01-01T00:00:00Z", "user_prompt")
+        db.commit()
+
+        count = _count(db, "events", "session_id='sens-ex-1' AND event_type='sensitive_data'")
+        assert count == 0
+
+    def test_context_aware_tool_result_with_tests_path(self, watcher, db):
+        """Tool result containing /tests/ path should downgrade severity to low."""
+        watcher._ensure_session("sens-ctx-1", "/tmp/s.jsonl")
+        text = "AKIAI44QH8DHBR3XYZAB found in /tests/test_auth.py"
+        watcher._check_sensitive(text, "sens-ctx-1", "2026-01-01T00:00:00Z", "tool_result")
+        db.commit()
+
+        rows = db.execute(
+            "SELECT data_json FROM events WHERE session_id='sens-ctx-1' AND event_type='sensitive_data'"
+        ).fetchall()
+        assert len(rows) >= 1
+        data = json.loads(rows[0][0])
+        assert data["severity"] == "low"
+
+    def test_context_aware_assistant_discussing_security(self, watcher, db):
+        """Assistant discussing security findings should downgrade from critical to medium."""
+        watcher._ensure_session("sens-ctx-2", "/tmp/s.jsonl")
+        text = "I found AKIAI44QH8DHBR3XYZAB in the code and detected a credential leak. You should rotate this key."
+        watcher._check_sensitive(text, "sens-ctx-2", "2026-01-01T00:00:00Z", "assistant_response")
+        db.commit()
+
+        rows = db.execute(
+            "SELECT data_json FROM events WHERE session_id='sens-ctx-2' AND event_type='sensitive_data'"
+        ).fetchall()
+        assert len(rows) >= 1
+        data = json.loads(rows[0][0])
+        assert data["severity"] == "medium"
+
+    def test_context_aware_tool_result_with_example(self, watcher, db):
+        """Tool result containing 'EXAMPLE' near match should downgrade to low."""
+        watcher._ensure_session("sens-ctx-3", "/tmp/s.jsonl")
+        text = "The key AKIAI44QH8DHBR3XYZAB is an example credential for testing"
+        watcher._check_sensitive(text, "sens-ctx-3", "2026-01-01T00:00:00Z", "tool_result")
+        db.commit()
+
+        rows = db.execute(
+            "SELECT data_json FROM events WHERE session_id='sens-ctx-3' AND event_type='sensitive_data'"
+        ).fetchall()
+        assert len(rows) >= 1
+        data = json.loads(rows[0][0])
+        assert data["severity"] == "low"
 
 
 # ---------------------------------------------------------------------------
@@ -731,7 +773,7 @@ class TestProcessUserMessage:
     def test_sensitive_data_in_prompt(self, watcher, db):
         watcher._ensure_session("user-sens", "/tmp/s.jsonl")
         record = {
-            "message": {"role": "user", "content": "my key is AKIAIOSFODNN7EXAMPLE"},
+            "message": {"role": "user", "content": "my key is AKIAI44QH8DHBR3XYZAB"},
         }
         watcher._process_user_message(record, "user-sens", "2026-01-01T00:00:00Z")
         db.commit()
@@ -798,7 +840,6 @@ class TestProcessAssistantMessage:
         assert data["output_tokens"] == 100
         assert data["cache_read_tokens"] == 200
         assert data["cache_write_tokens"] == 50
-        assert data["cost"] > 0
 
     def test_session_stats_updated(self, watcher, db):
         watcher._ensure_session("asst-3", "/tmp/s.jsonl")
@@ -1121,7 +1162,7 @@ class TestProcessAssistantMessage:
         record = {
             "message": {
                 "role": "assistant",
-                "content": [{"type": "text", "text": "Found key: AKIAIOSFODNN7EXAMPLE"}],
+                "content": [{"type": "text", "text": "Found key: AKIAI44QH8DHBR3XYZAB"}],
                 "model": "claude-sonnet-4",
                 "usage": {},
             }
@@ -1142,7 +1183,7 @@ class TestProcessAssistantMessage:
                         "type": "tool_use",
                         "id": "t1",
                         "name": "Bash",
-                        "input": {"command": "echo AKIAIOSFODNN7EXAMPLE"},
+                        "input": {"command": "echo AKIAI44QH8DHBR3XYZAB"},
                     }
                 ],
                 "model": "claude-sonnet-4",
@@ -1154,6 +1195,80 @@ class TestProcessAssistantMessage:
 
         count = _count(db, "events", "session_id='asst-tool-sens' AND event_type='sensitive_data'")
         assert count >= 1
+
+    def test_mcp_tool_creates_mcp_call_event(self, watcher, db):
+        """MCP tool_use (mcp__server__method) should also store an mcp_call event."""
+        watcher._ensure_session("asst-mcp-1", "/tmp/s.jsonl")
+        record = {
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t-mcp-1",
+                        "name": "mcp__filesystem__read_file",
+                        "input": {"path": "/tmp/foo.txt"},
+                    }
+                ],
+                "model": "claude-sonnet-4",
+                "usage": {},
+            }
+        }
+        watcher._process_assistant_message(record, "asst-mcp-1", "2026-01-01T00:00:00Z")
+        db.commit()
+
+        # Should have both tool_use and mcp_call events
+        tool_count = _count(db, "events", "session_id='asst-mcp-1' AND event_type='tool_use'")
+        mcp_count = _count(db, "events", "session_id='asst-mcp-1' AND event_type='mcp_call'")
+        assert tool_count >= 1
+        assert mcp_count >= 1
+
+        # mcp_call should have parsed server/method
+        row = db.execute(
+            "SELECT data_json FROM events WHERE session_id='asst-mcp-1' AND event_type='mcp_call'"
+        ).fetchone()
+        data = json.loads(row[0])
+        assert data["server"] == "filesystem"
+        assert data["method"] == "read_file"
+
+    def test_mcp_alert_on_unknown_server(self, watcher, db, monkeypatch):
+        """Unknown MCP server triggers sensitive_data alert when configured."""
+        monkeypatch.setattr("claude_monitoring.monitor.is_mcp_alert_on_unknown", lambda: True)
+        monkeypatch.setattr("claude_monitoring.monitor.get_mcp_known_servers", lambda: ["filesystem"])
+
+        watcher._ensure_session("asst-mcp-alert", "/tmp/s.jsonl")
+        record = {
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t-mcp-2",
+                        "name": "mcp__evil_server__steal_data",
+                        "input": {},
+                    }
+                ],
+                "model": "claude-sonnet-4",
+                "usage": {},
+            }
+        }
+        watcher._process_assistant_message(record, "asst-mcp-alert", "2026-01-01T00:00:00Z")
+        db.commit()
+
+        # Should have a sensitive_data alert for the unknown MCP server
+        rows = db.execute(
+            "SELECT data_json FROM events WHERE session_id='asst-mcp-alert' AND event_type='sensitive_data'"
+        ).fetchall()
+        assert len(rows) >= 1
+        found_mcp_alert = False
+        for row in rows:
+            data = json.loads(row[0])
+            patterns = data.get("patterns", [])
+            if any("unknown_mcp_server" in p for p in patterns):
+                found_mcp_alert = True
+                assert data["severity"] == "high"
+                assert "evil_server" in data["context"]
+        assert found_mcp_alert
 
 
 # ---------------------------------------------------------------------------
